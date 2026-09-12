@@ -337,7 +337,8 @@ public class master_ship : MonoBehaviour, IShipState
         float heave = buoyancy != null ? buoyancy.HeaveVelocity : 0f;
 
         // Grounding: keel on the seabed -> stop sinking, scrub speed, shudder.
-        grounded = enableGrounding && CheckGrounding(out float seabedY);
+        float seabedY = float.NegativeInfinity;
+        grounded = enableGrounding && CheckGrounding(out seabedY);
         if (grounded)
         {
             Vector3 keelP = transform.TransformPoint(new Vector3(localBounds.center.x, localBounds.min.y, localBounds.center.z));
