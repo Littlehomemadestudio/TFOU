@@ -1,0 +1,52 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!21 &2100000
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: AutoOceanWaterMat
+  m_Shader: {fileID: 4800000, guid: ae9083a6edd4f0f4698c91f6e50307b1, type: 3}
+  m_Parent: {fileID: 0}
+  m_ModifiedSerializedProperties: 0
+  m_ValidKeywords: []
+  m_InvalidKeywords: []
+  m_LightmapFlags: 4
+  m_EnableInstancingVariants: 0
+  m_DoubleSidedGI: 0
+  m_CustomRenderQueue: -1
+  stringTagMap: {}
+  disabledShaderPasses: []
+  m_LockedProperties: 
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs: []
+    m_Ints: []
+    m_Floats:
+    - _DetailFadeDistance: 1200
+    - _DetailScale: 0.35
+    - _DetailSpeed: 1
+    - _DetailStrength: 0.5
+    - _FoamAmount: 1.2
+    - _FoamThreshold: 0.55
+    - _FresnelPower: 3
+    - _HullFoamRadius: 40
+    - _HullFoamStrength: 1.4
+    - _ReflectionStrength: 1
+    - _SubsurfaceStrength: 0.5
+    - _SunSpecIntensity: 2
+    - _SunSpecPower: 256
+    - _WakeLength: 220
+    - _WakeStrength: 1.2
+    - _WakeWidth: 18
+    m_Colors:
+    - _CrestColor: {r: 0.02, g: 0.21999997, b: 0.29999998, a: 1}
+    - _DeepColor: {r: 0.008, g: 0.089999996, b: 0.15999997, a: 1}
+    - _FoamColor: {r: 0.92, g: 0.96999997, b: 1, a: 1}
+    - _HorizonSkyColor: {r: 0.45, g: 0.62, b: 0.72, a: 1}
+    - _SubsurfaceColor: {r: 0.049999982, g: 0.45, b: 0.41999996, a: 1}
+    - _ZenithSkyColor: {r: 0.09999997, g: 0.27999997, b: 0.54999995, a: 1}
+  m_BuildTextureStacks: []
+  m_AllowLocking: 1
