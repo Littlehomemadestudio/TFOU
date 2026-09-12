@@ -1,79 +1,46 @@
 using UnityEngine;
-using UnityEngine.InputSystem;
-
+using UnityEngine.Rendering;
+using UnityEngine.Rendering.Universal;
+using TFOU.Ocean;
+using TFOU.Ship;
 #if UNITY_EDITOR
 using UnityEditor;
-using System.IO;
 #endif
 
+/// <summary>
+/// master_ship - naval vessel orchestrator (TFOU).
+///
+/// Attach to any ship root with a Rigidbody. Everything else bootstraps itself:
+///   - OceanWaves      shared 8-wave Beaufort Gerstner sea (CPU + GPU in sync)
+///   - water rings     near / mid / horizon GPU-displaced meshes (layer: Water)
+///   - ShipBuoyancy    9-point hull sampling, plane-fit pitch/roll, bow slams
+///   - ShipCameraRig   4 cinematic camera modes with collision + shake
+///   - ShipEffects     procedural bow spray, wake foam, funnel smoke
+///   - OceanQuality    HDR, SMAA, ACES tonemapping, bloom, vignette
+///   - planar reflections (High/Ultra quality)
+///
+/// Controls:
+///   W/S or sticks  - engine ahead / astern        Shift or RT - flank boost
+///   A/D or sticks  - rudder                       Space or B  - all-stop brake
+///   C / Tab / Y    - cycle camera mode            RMB drag    - free orbit
+///   Wheel / dpad   - zoom                         O / P       - sea state -/+
+///   F              - toggle telemetry HUD
+/// </summary>
 [RequireComponent(typeof(Rigidbody))]
-public class master_ship : MonoBehaviour
+public class master_ship : MonoBehaviour, IShipState
 {
-        void CalculateLocalBounds()
-    {
-        bool found = false;
+    public enum QualityTier { Low, Medium, High, Ultra }
 
-        Renderer[] renderers = GetComponentsInChildren<Renderer>();
-        if (renderers.Length > 0)
-        {
-            Bounds worldBounds = renderers[0].bounds;
-            for (int i = 1; i < renderers.Length; i++)
-                worldBounds.Encapsulate(renderers[i].bounds);
-
-            localBounds = new Bounds(transform.InverseTransformPoint(worldBounds.center), Vector3.zero);
-
-            foreach (Renderer r in renderers)
-                EncapsulateWorldBounds(ref localBounds, r.bounds);
-
-            found = true;
-        }
-        else
-        {
-            Collider[] colliders = GetComponentsInChildren<Collider>();
-            if (colliders.Length > 0)
-            {
-                Bounds worldBounds = colliders[0].bounds;
-                for (int i = 1; i < colliders.Length; i++)
-                    worldBounds.Encapsulate(colliders[i].bounds);
-
-                localBounds = new Bounds(transform.InverseTransformPoint(worldBounds.center), Vector3.zero);
-
-                foreach (Collider c in colliders)
-                    EncapsulateWorldBounds(ref localBounds, c.bounds);
-
-                found = true;
-            }
-        }
-
-        if (!found || localBounds.size.sqrMagnitude < 0.01f)
-        {
-            localBounds = new Bounds(Vector3.zero, new Vector3(14f, 8f, 60f));
-        }
-    }
-
-    void EncapsulateWorldBounds(ref Bounds localBoundsToFill, Bounds worldBounds)
-    {
-        Vector3 center = worldBounds.center;
-        Vector3 extents = worldBounds.extents;
-
-        for (int x = -1; x <= 1; x += 2)
-        {
-            for (int y = -1; y <= 1; y += 2)
-            {
-                for (int z = -1; z <= 1; z += 2)
-                {
-                    Vector3 corner = center + new Vector3(extents.x * x, extents.y * y, extents.z * z);
-                    localBoundsToFill.Encapsulate(transform.InverseTransformPoint(corner));
-                }
-            }
-        }
-    }
-    [Header("=== CRUISER MOVEMENT ===")]
+    [Header("=== ENGINE ===")]
     public float maxSpeed = 36f;
     public float maxReverseSpeed = 12f;
     public float acceleration = 6f;
     public float deceleration = 6f;
     public float propulsionForce = 12f;
+    [Tooltip("Flank speed multiplier while holding boost.")]
+    public float boostMultiplier = 1.28f;
+    [Tooltip("Lateral slip when carving hard turns (0 = train tracks).")]
+    [Range(0f, 0.6f)] public float driftFactor = 0.22f;
 
     [Header("=== STEERING FEEL ===")]
     public float maxTurnRate = 20f;
@@ -84,25 +51,26 @@ public class master_ship : MonoBehaviour
     public float heelSmooth = 3f;
     public float pitchSmooth = 3f;
 
-    [Header("=== FLOATING ===")]
+    [Header("=== FLOATING (multi-point buoyancy) ===")]
     public float verticalSpring = 2.5f;
     public float bobFollowSpeed = 3f;
     public float maxVerticalSpeed = 8f;
-    [Range(0f, 1f)] public float tiltInfluence = 0.35f;
+    [Range(0f, 1f)] public float tiltInfluence = 0.55f;
     public float tiltSmooth = 2.5f;
     public float rotationSmooth = 8f;
 
-    [Header("=== GERSTNER OCEAN WAVES ===")]
-    [Tooltip("Total wave height.")]
+    [Header("=== SEA STATE (Beaufort) ===")]
+    [Range(0f, 10f)]
+    [Tooltip("0 = glass, 4 = moderate, 7 = high, 10 = hurricane. O/P keys adjust live.")]
+    public float seaState = 4f;
+    [Range(0f, 360f)] public float windDirectionDeg = 45f;
+    [Tooltip("Legacy amplitude multiplier.")]
     public float waveAmplitude = 1.1f;
-    [Tooltip("0 = round swell, 1 = sharp choppy crests.")]
     [Range(0f, 1f)] public float waveChoppiness = 0.55f;
-    [Tooltip("Multiplier for wavelength.")]
     public float waveLengthScale = 1f;
-    [Tooltip("Multiplier for wave travel speed.")]
     public float waveSpeedMultiplier = 1f;
 
-    [Header("=== WATER LOOK (Custom URP Shader) ===")]
+    [Header("=== WATER LOOK ===")]
     public Color deepColor = new Color(0.008f, 0.09f, 0.16f, 1f);
     public Color crestColor = new Color(0.02f, 0.22f, 0.30f, 1f);
     public Color foamColor = new Color(0.92f, 0.97f, 1f, 1f);
@@ -122,15 +90,30 @@ public class master_ship : MonoBehaviour
     [Range(0f, 3f)] public float hullFoamStrength = 1.4f;
     [Range(0f, 3f)] public float wakeStrength = 1.2f;
     [Range(0f, 3f)] public float subsurfaceStrength = 0.5f;
+    [Range(0.5f, 80f)] public float absorptionDepth = 14f;
+    [Range(0f, 2f)] public float refractionStrength = 0.5f;
+    [Range(0f, 3f)] public float contactFoamStrength = 1.3f;
 
-    [Header("=== WATER GENERATION ===")]
+    [Header("=== WATER RINGS ===")]
     public bool autoGenerateWater = true;
     public bool autoSetupFog = true;
     public float waterLevel = 0f;
+    [Tooltip("Fine ring around the ship.")]
+    public float nearRingSize = 420f;
+    public int nearRingResolution = 256;
+    [Tooltip("Mid ring (legacy waterSize also feeds this).")]
     public float waterSize = 3000f;
-    public float horizonWaterSize = 30000f;
     public int waterResolution = 96;
+    public float horizonWaterSize = 30000f;
     public bool waterFollowsShip = true;
+
+    [Header("=== QUALITY ===")]
+    public QualityTier qualityTier = QualityTier.High;
+    public bool planarReflections = true;
+    [Range(0.125f, 1f)] public float reflectionResolutionScale = 0.5f;
+    public bool bowSpray = true;
+    public bool sternWakeFoam = true;
+    public bool funnelSmoke = true;
 
     [Header("=== CAMERA ===")]
     public bool autoFitCameraToShipSize = true;
@@ -146,57 +129,56 @@ public class master_ship : MonoBehaviour
     [Range(5f, 80f)] public float minPitch = 10f;
     [Range(5f, 80f)] public float maxPitch = 65f;
 
-    // ---------- internals ----------
+    [Header("=== HUD ===")]
+    public bool showTelemetryHud = true;
+
+    // ---------- runtime ----------
     private Rigidbody rb;
     private Camera mainCam;
     private Bounds localBounds;
     private Vector3 cameraPivotOffset;
 
-    private float currentSpeed = 0f;
-    private float currentRudder = 0f;
+    private OceanWaves waves;
+    private ShipBuoyancy buoyancy;
+    private ShipCameraRig camRig;
+    private ShipEffects effects;
+    private WaterPlanarReflections planarRefl;
 
-    private float camYaw = 0f;
-    private float camPitch = 25f;
-    private float currentDistance = 55f;
-    private float targetDistance = 55f;
-    private Vector3 camPosVel;
-    private bool isTactical = false;
+    private Material waterMat;       // shared by all three rings
+    private Material softParticleMat;
+    private bool usingCustomShader;
 
-    private Mesh nearMesh;
-    private Vector3[] nearVertices;
-    private Color[] nearColors;
-    private Transform nearTransform;
-    private Transform horizonTransform;
+    private Transform nearTransform, midTransform, horizonTransform;
+    private float nearCell, midCell;
 
-    private Material nearMat;
-    private Material horizonMat;
-    private bool usingCustomShader = false;
-
-    private float shipYaw = 0f;
-    private Vector3 smoothedWaterUp = Vector3.up;
-    private float smoothedTargetY = 0f;
-    private bool floatingInitialized = false;
-    private float smoothedHeel = 0f;
-    private float smoothedPitch = 0f;
-
-    // Gerstner wave data
-    private const int WAVE_COUNT = 4;
-    private float[] wDirX = new float[WAVE_COUNT];
-    private float[] wDirZ = new float[WAVE_COUNT];
-    private float[] wK = new float[WAVE_COUNT];
-    private float[] wAmp = new float[WAVE_COUNT];
-    private float[] wOmega = new float[WAVE_COUNT];
-    private float[] wQ = new float[WAVE_COUNT];
-    private float lastAmp = -1f, lastChop = -1f, lastScale = -1f, lastSpeed = -1f;
-
+    private float currentSpeed;
+    private float currentRudder;
+    private float engineLoad;
+    private float shipYaw;
+    private float smoothedHeel;
+    private float smoothedPitch;
     private float hullRadius = 20f;
+    private bool initialized;
+
+    private GUIStyle hudStyle;
 
     private const string SHADER_DIR = "Assets/AutoGeneratedWater";
     private const string SHADER_RES_DIR = "Assets/AutoGeneratedWater/Resources";
     private const string SHADER_PATH = "Assets/AutoGeneratedWater/AutoOceanWater.shader";
     private const string MAT_PATH = "Assets/AutoGeneratedWater/Resources/AutoOceanWaterMat.mat";
+    private const string SOFT_SHADER_PATH = "Assets/AutoGeneratedWater/AutoSoftParticle.shader";
+    private const string SOFT_MAT_PATH = "Assets/AutoGeneratedWater/Resources/AutoSoftParticleMat.mat";
 
-    void Awake()
+    // ================= IShipState =================
+    public float Speed01 => Mathf.Clamp01(Mathf.Abs(currentSpeed) / Mathf.Max(1f, maxSpeed));
+    public float Rudder01 => currentRudder;
+    public float HeelDegrees => smoothedHeel;
+    public float SpeedKnots => currentSpeed * 1.94384f;
+    public float EngineLoad01 => engineLoad;
+
+    // ================= LIFECYCLE =================
+
+    private void Awake()
     {
         transform.rotation = Quaternion.Euler(0f, transform.eulerAngles.y, 0f);
 
@@ -205,56 +187,191 @@ public class master_ship : MonoBehaviour
         rb.useGravity = false;
         rb.interpolation = RigidbodyInterpolation.Interpolate;
         rb.collisionDetectionMode = CollisionDetectionMode.Discrete;
-        rb.solverIterations = 12;
-        rb.solverVelocityIterations = 6;
+        rb.solverIterations = 6;
+        rb.solverVelocityIterations = 4;
         rb.linearDamping = 0f;
         rb.angularDamping = 0f;
         rb.constraints = RigidbodyConstraints.None;
 
+        CalculateLocalBounds();
+        hullRadius = Mathf.Max(localBounds.extents.x, localBounds.extents.z) * 0.85f;
+        cameraPivotOffset = localBounds.center + Vector3.up * localBounds.size.y * 0.25f;
+
         EnsureCamera();
-        AutoSetup();
+        SetupOceanWaves();
+        SetupMaterials();
+        if (autoGenerateWater) CreateWaterRings();
+        SetupBuoyancy();
+        SetupCameraRig();
+        SetupEffects();
+        ApplyQualityTier();
+        if (autoSetupFog) SetupFog();
 
         shipYaw = transform.eulerAngles.y;
-        smoothedTargetY = transform.position.y;
-        smoothedWaterUp = Vector3.up;
-
-        currentDistance = defaultDistance;
-        targetDistance = defaultDistance;
-        camYaw = transform.eulerAngles.y;
-        camPitch = 25f;
+        initialized = true;
 
         if (mainCam != null)
         {
-            float neededFar = Mathf.Max(horizonWaterSize * 1.25f, 20000f);
+            float neededFar = Mathf.Max(horizonWaterSize * 1.4f, 20000f);
             mainCam.farClipPlane = Mathf.Max(mainCam.farClipPlane, neededFar);
         }
     }
 
-    void EnsureCamera()
+    private void OnDestroy()
+    {
+        if (planarRefl != null) Destroy(planarRefl.gameObject);
+        if (nearTransform != null) Destroy(nearTransform.gameObject);
+        if (midTransform != null) Destroy(midTransform.gameObject);
+        if (horizonTransform != null) Destroy(horizonTransform.gameObject);
+    }
+
+    private void Update()
+    {
+        if (!initialized) return;
+
+        // Live tuning keys
+        if (ShipInput.KeyDown(KeyCode.O)) seaState = Mathf.Max(0f, seaState - 0.5f);
+        if (ShipInput.KeyDown(KeyCode.P)) seaState = Mathf.Min(10f, seaState + 0.5f);
+        if (ShipInput.KeyDown(KeyCode.F)) showTelemetryHud = !showTelemetryHud;
+        if (waves != null && Mathf.Abs(waves.seaState - seaState) > 0.001f) waves.seaState = seaState;
+    }
+
+    private void FixedUpdate()
+    {
+        if (!initialized || rb == null) return;
+
+        float dt = Time.fixedDeltaTime;
+
+        // ---------- engine telegraph ----------
+        float throttle = ShipInput.Throttle();
+        float steer = ShipInput.Steer();
+        bool boost = ShipInput.Boost();
+        bool brake = ShipInput.Brake();
+
+        float targetSpeed = 0f;
+        if (brake) targetSpeed = 0f;
+        else if (throttle > 0.01f) targetSpeed = boost ? maxSpeed * boostMultiplier : maxSpeed;
+        else if (throttle < -0.01f) targetSpeed = -maxReverseSpeed;
+
+        float rate = brake ? deceleration * 2.5f : (Mathf.Abs(throttle) > 0.01f ? acceleration : deceleration);
+        currentSpeed = Mathf.MoveTowards(currentSpeed, targetSpeed, rate * dt);
+
+        float loadTarget = Mathf.Clamp01(Mathf.Abs(currentSpeed) / Mathf.Max(1f, maxSpeed) + (boost && throttle > 0.5f ? 0.25f : 0f));
+        engineLoad = Mathf.MoveTowards(engineLoad, loadTarget, dt * 0.8f);
+
+        currentRudder = Mathf.MoveTowards(currentRudder, steer, rudderResponsiveness * dt);
+
+        // ---------- buoyancy (samples OceanWaves at 9 hull points) ----------
+        if (buoyancy != null) buoyancy.Simulate(dt);
+
+        // ---------- heading ----------
+        float absSpeed = Mathf.Abs(currentSpeed);
+        float speedRatio = Mathf.Clamp01(absSpeed / Mathf.Max(1f, maxSpeed));
+        float moveFactor = Mathf.Clamp01(absSpeed / 2f);
+        float turnPenalty = 1f - highSpeedTurnPenalty * speedRatio;
+
+        float turnRateDeg = currentRudder * maxTurnRate * moveFactor * turnPenalty;
+        shipYaw += turnRateDeg * dt;
+        shipYaw = Mathf.Repeat(shipYaw + 180f, 360f) - 180f;
+
+        // ---------- orientation: wave plane + dynamic heel/pitch ----------
+        Vector3 waterUp = buoyancy != null ? buoyancy.SmoothedWaveNormal : Vector3.up;
+        Vector3 forwardYaw = Quaternion.Euler(0f, shipYaw, 0f) * Vector3.forward;
+        Vector3 forwardOnWater = Vector3.ProjectOnPlane(forwardYaw, waterUp);
+        if (forwardOnWater.sqrMagnitude < 0.0001f) forwardOnWater = transform.forward;
+        forwardOnWater.Normalize();
+
+        Quaternion waterRot = Quaternion.LookRotation(forwardOnWater, waterUp);
+
+        float heelAuthority = Mathf.Clamp01(absSpeed / 8f + 0.1f);
+        float targetHeel = -currentRudder * heelAuthority * turnHeelDegrees;
+        float targetPitch = -throttle * accelPitchDegrees;
+
+        smoothedHeel = Mathf.MoveTowards(smoothedHeel, targetHeel, heelSmooth * dt);
+        smoothedPitch = Mathf.MoveTowards(smoothedPitch, targetPitch, pitchSmooth * dt);
+
+        Quaternion targetRot = waterRot * Quaternion.Euler(smoothedPitch, 0f, smoothedHeel);
+        rb.MoveRotation(Quaternion.Slerp(rb.rotation, targetRot, rotationSmooth * dt));
+        shipYaw = Mathf.Repeat(rb.rotation.eulerAngles.y + 180f, 360f) - 180f;
+
+        // ---------- velocity: thrust + carve slip + heave ----------
+        Vector3 vel = rb.linearVelocity;
+        Vector3 horizontalVel = new Vector3(vel.x, 0f, vel.z);
+
+        Vector3 targetVel = forwardOnWater * currentSpeed;
+        targetVel.y = 0f;
+
+        // inertia drift: the stern slides wide in hard turns
+        float slip = -(turnRateDeg / Mathf.Max(1f, maxTurnRate)) * speedRatio * driftFactor * currentSpeed;
+        targetVel += transform.right * slip;
+
+        Vector3 newHorizontal = Vector3.MoveTowards(horizontalVel, targetVel, propulsionForce * dt);
+        float heave = buoyancy != null ? buoyancy.HeaveVelocity : 0f;
+        rb.linearVelocity = new Vector3(newHorizontal.x, heave, newHorizontal.z);
+    }
+
+    private void LateUpdate()
+    {
+        if (!initialized) return;
+
+        FollowWaterRings();
+        PushShipUniforms();
+    }
+
+    // ================= SUBSYSTEM SETUP =================
+
+    private void EnsureCamera()
     {
         mainCam = Camera.main;
         if (mainCam != null) return;
 
-        GameObject camObj = new GameObject("Main Camera");
+        var camObj = new GameObject("Main Camera");
         camObj.tag = "MainCamera";
         mainCam = camObj.AddComponent<Camera>();
         mainCam.clearFlags = CameraClearFlags.Skybox;
         mainCam.nearClipPlane = 0.3f;
-        mainCam.farClipPlane = 40000f;
+        mainCam.farClipPlane = 45000f;
 
-        if (FindObjectOfType<AudioListener>() == null)
+        if (FindFirstObjectByType<AudioListener>() == null)
             camObj.AddComponent<AudioListener>();
     }
 
-    void AutoSetup()
+    private void SetupOceanWaves()
     {
-        CalculateLocalBounds();
-        SetupFog();
-        BuildWaves(true);
-        CreateWater();
+        waves = OceanWaves.Ensure();
+        waves.seaState = seaState;
+        waves.windDirectionDeg = windDirectionDeg;
+        waves.amplitudeMultiplier = waveAmplitude;
+        waves.choppiness = waveChoppiness;
+        waves.lengthScale = waveLengthScale;
+        waves.speedMultiplier = waveSpeedMultiplier;
+        waves.waterLevel = waterLevel;
+        waves.MarkDirty();
+    }
 
-        hullRadius = Mathf.Max(localBounds.extents.x, localBounds.extents.z) * 0.85f;
-        cameraPivotOffset = localBounds.center + Vector3.up * localBounds.size.y * 0.25f;
+    private void SetupBuoyancy()
+    {
+        buoyancy = GetComponent<ShipBuoyancy>();
+        if (buoyancy == null) buoyancy = gameObject.AddComponent<ShipBuoyancy>();
+        buoyancy.ConfigureFrom(localBounds, verticalSpring, bobFollowSpeed, maxVerticalSpeed, tiltInfluence, tiltSmooth);
+        buoyancy.OnBowSlam += HandleBowSlam;
+    }
+
+    private void HandleBowSlam(float intensity)
+    {
+        if (camRig != null)
+        {
+            camRig.AddShake(intensity * 0.6f);
+            camRig.AddFovPunch(intensity * 2f);
+        }
+    }
+
+    private void SetupCameraRig()
+    {
+        if (mainCam == null) return;
+
+        camRig = mainCam.GetComponent<ShipCameraRig>();
+        if (camRig == null) camRig = mainCam.gameObject.AddComponent<ShipCameraRig>();
 
         if (autoFitCameraToShipSize)
         {
@@ -262,145 +379,162 @@ public class master_ship : MonoBehaviour
             tacticalDistance = defaultDistance * 2.5f;
             minDistance = Mathf.Clamp(localBounds.size.z * 0.45f, 15f, defaultDistance * 0.5f);
         }
+
+        camRig.defaultDistance = defaultDistance;
+        camRig.tacticalDistance = tacticalDistance;
+        camRig.minDistance = minDistance;
+        camRig.maxZoomOut = Mathf.Max(tacticalDistance * 3f, 400f);
+        camRig.baseFOV = baseFOV;
+        camRig.maxSpeedFOV = maxSpeedFOV;
+        camRig.orbitSpeed = cameraOrbitSpeed;
+        camRig.zoomSpeed = cameraZoomSpeed;
+        camRig.minPitch = minPitch;
+        camRig.maxPitch = maxPitch;
+        camRig.yawFollowSpeed = yawFollowSpeed;
+        camRig.autoFollowShipYaw = cameraAutoFollowShipYaw;
+        camRig.Initialize(transform, this, cameraPivotOffset);
     }
 
-    void SetupFog()
+    private void SetupEffects()
     {
-        if (!autoSetupFog) return;
+        effects = GetComponent<ShipEffects>();
+        if (effects == null) effects = gameObject.AddComponent<ShipEffects>();
+        effects.bowSpray = bowSpray;
+        effects.sternWake = sternWakeFoam;
+        effects.funnelSmoke = funnelSmoke;
+        effects.Initialize(transform, this, buoyancy, localBounds, softParticleMat);
+    }
 
+    private void SetupFog()
+    {
         RenderSettings.fog = true;
         RenderSettings.fogMode = FogMode.ExponentialSquared;
         RenderSettings.fogColor = Color.Lerp(horizonSkyColor, deepColor, 0.35f);
-        RenderSettings.fogDensity = 0.00016f;
+        RenderSettings.fogDensity = 0.0004f;
     }
 
-    // ================= GERSTNER WAVES (CPU, shared by mesh + physics) =================
-
-    void BuildWaves(bool force)
+    private void ApplyQualityTier()
     {
-        if (!force && lastAmp == waveAmplitude && lastChop == waveChoppiness &&
-            lastScale == waveLengthScale && lastSpeed == waveSpeedMultiplier)
-            return;
+        OceanQuality.PatchPipelineAsset();
 
-        lastAmp = waveAmplitude; lastChop = waveChoppiness;
-        lastScale = waveLengthScale; lastSpeed = waveSpeedMultiplier;
+        bool postFX = qualityTier != QualityTier.Low;
+        OceanQuality.PatchCamera(mainCam, postFX);
+        if (postFX)
+            OceanQuality.EnsurePostVolume(
+                qualityTier == QualityTier.Ultra ? 0.75f : 0.55f,
+                qualityTier == QualityTier.Low ? 0.2f : 0.28f);
+        else
+            OceanQuality.DestroyPostVolume();
 
-        Vector2[] dirs = { new Vector2(1f, 0.15f), new Vector2(0.62f, 0.78f), new Vector2(-0.35f, 0.94f), new Vector2(-0.8f, -0.6f) };
-        float[] lengths = { 63f, 34f, 19f, 10.5f };
-        float[] fracs = { 0.45f, 0.28f, 0.17f, 0.10f };
-
-        for (int i = 0; i < WAVE_COUNT; i++)
+        // --- planar reflections: High/Ultra only ---
+        bool wantRefl = planarReflections && qualityTier >= QualityTier.High && usingCustomShader;
+        if (wantRefl)
         {
-            Vector2 d = dirs[i].normalized;
-            wDirX[i] = d.x;
-            wDirZ[i] = d.y;
+            if (planarRefl == null)
+            {
+                var go = new GameObject("OceanPlanarReflections");
+                planarRefl = go.AddComponent<WaterPlanarReflections>();
+            }
+            planarRefl.resolutionScale = qualityTier == QualityTier.Ultra
+                ? Mathf.Max(reflectionResolutionScale, 0.7f)
+                : reflectionResolutionScale;
+            planarRefl.frameSkip = qualityTier == QualityTier.Ultra ? 0 : 1;
+            planarRefl.enabled = true;
+        }
+        else if (planarRefl != null)
+        {
+            planarRefl.enabled = false;
+        }
 
-            float L = Mathf.Max(1f, lengths[i] * waveLengthScale);
-            wK[i] = Mathf.PI * 2f / L;
-            wAmp[i] = Mathf.Max(0.001f, waveAmplitude * fracs[i]);
+        if (waterMat != null)
+        {
+            SetKeyword(waterMat, WaterPlanarReflections.KeywordName, wantRefl);
+            SetKeyword(waterMat, "_REFRACTION_ON",
+                postFX && UniversalRenderPipeline.asset != null && UniversalRenderPipeline.asset.supportsCameraOpaqueTexture);
+        }
 
-            float c = Mathf.Sqrt(9.81f / wK[i]) * waveSpeedMultiplier;
-            wOmega[i] = wK[i] * c;
-
-            wQ[i] = waveChoppiness / (wK[i] * wAmp[i] * WAVE_COUNT);
+        if (effects != null)
+        {
+            effects.SetQualityDensity(qualityTier switch
+            {
+                QualityTier.Low => 0.4f,
+                QualityTier.Medium => 0.75f,
+                QualityTier.High => 1f,
+                _ => 1.5f
+            });
         }
     }
 
-    void SampleGerstner(float x, float z, float t,
-        out float height, out float dx, out float dz,
-        out float nx, out float ny, out float nz)
+    private static void SetKeyword(Material m, string keyword, bool on)
     {
-        height = 0f; dx = 0f; dz = 0f;
-        nx = 0f; nz = 0f;
-        ny = 1f;
-
-        for (int i = 0; i < WAVE_COUNT; i++)
-        {
-            float phi = wK[i] * (wDirX[i] * x + wDirZ[i] * z) - wOmega[i] * t;
-            float S = Mathf.Sin(phi);
-            float C = Mathf.Cos(phi);
-
-            height += wAmp[i] * S;
-            dx += wQ[i] * wAmp[i] * wDirX[i] * C;
-            dz += wQ[i] * wAmp[i] * wDirZ[i] * C;
-
-            nx -= wDirX[i] * wK[i] * wAmp[i] * C;
-            nz -= wDirZ[i] * wK[i] * wAmp[i] * C;
-            ny -= wQ[i] * wK[i] * wAmp[i] * S;
-        }
-
-        float inv = 1f / Mathf.Max(0.0001f, Mathf.Sqrt(nx * nx + ny * ny + nz * nz));
-        nx *= inv; ny *= inv; nz *= inv;
+        if (on) m.EnableKeyword(keyword);
+        else m.DisableKeyword(keyword);
     }
 
-    float GetWaveHeight(float x, float z)
+    // ================= MATERIALS =================
+
+    private void SetupMaterials()
     {
-        SampleGerstner(x, z, Time.time, out float h, out _, out _, out _, out _, out _);
-        return h;
-    }
-
-    // ================= WATER OBJECTS =================
-
-    void CreateWater()
-    {
-        if (!autoGenerateWater) return;
-
-        GameObject legacy = GameObject.Find("AutoGenerated_Ocean");
-        if (legacy != null) legacy.SetActive(false);
-
-        LoadOrCreateShaderMaterial();
-        CreateNearWater();
-        CreateHorizonWater();
-    }
-
-    void LoadOrCreateShaderMaterial()
-    {
-        Material baseMat = null;
-
 #if UNITY_EDITOR
-        try
-        {
-            EnsureWaterShaderAsset();
-            baseMat = AssetDatabase.LoadAssetAtPath<Material>(MAT_PATH);
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogWarning("Water shader asset generation failed: " + e.Message);
-        }
-#else
-        baseMat = Resources.Load<Material>("AutoOceanWaterMat");
+        EnsureWaterMaterialAsset(SHADER_PATH, MAT_PATH, "AutoOceanWaterMat");
+        EnsureWaterMaterialAsset(SOFT_SHADER_PATH, SOFT_MAT_PATH, "AutoSoftParticleMat");
 #endif
+        Material waterBase = LoadGeneratedMaterial("AutoOceanWaterMat", MAT_PATH);
+        softParticleMat = LoadGeneratedMaterial("AutoSoftParticleMat", SOFT_MAT_PATH);
 
-        if (baseMat != null && baseMat.shader != null && baseMat.shader.isSupported)
+        if (waterBase != null && waterBase.shader != null && waterBase.shader.isSupported)
         {
             usingCustomShader = true;
-            nearMat = new Material(baseMat);
-            horizonMat = new Material(baseMat);
-            ApplyWaterMaterialSettings();
+            waterMat = new Material(waterBase) { name = "AutoOceanWater (runtime)" };
+            SetWaterProps(waterMat);
         }
         else
         {
             usingCustomShader = false;
-            nearMat = CreateFallbackMaterial(true);
-            horizonMat = CreateFallbackMaterial(false);
+            waterMat = CreateFallbackMaterial();
+            Debug.LogWarning("[master_ship] AutoOceanWater shader unavailable - using fallback material. " +
+                             "Make sure Assets/AutoGeneratedWater/AutoOceanWater.shader exists and compiles.");
         }
     }
 
-    void ApplyWaterMaterialSettings()
+    private static Material LoadGeneratedMaterial(string resourceName, string assetPath)
     {
-        if (nearMat == null || horizonMat == null) return;
-
-        SetWaterProps(nearMat);
-
-        // Horizon variant: calmer micro detail, less foam
-        SetWaterProps(horizonMat);
-        horizonMat.SetFloat("_DetailScale", detailScale * 0.35f);
-        horizonMat.SetFloat("_DetailStrength", detailStrength * 0.7f);
-        horizonMat.SetFloat("_FoamAmount", foamAmount * 0.4f);
+        Material m = Resources.Load<Material>(resourceName);
+#if UNITY_EDITOR
+        if (m == null) m = AssetDatabase.LoadAssetAtPath<Material>(assetPath);
+#endif
+        return m;
     }
 
-    void SetWaterProps(Material m)
+#if UNITY_EDITOR
+    private static void EnsureWaterMaterialAsset(string shaderPath, string matPath, string matName)
     {
+        try
+        {
+            Shader shader = AssetDatabase.LoadAssetAtPath<Shader>(shaderPath);
+            if (shader == null) return;
+
+            Material existing = AssetDatabase.LoadAssetAtPath<Material>(matPath);
+            if (existing != null) return;
+
+            if (!AssetDatabase.IsValidFolder(SHADER_DIR)) AssetDatabase.CreateFolder("Assets", "AutoGeneratedWater");
+            if (!AssetDatabase.IsValidFolder(SHADER_RES_DIR)) AssetDatabase.CreateFolder(SHADER_DIR, "Resources");
+
+            var mat = new Material(shader) { name = matName };
+            AssetDatabase.CreateAsset(mat, matPath);
+            AssetDatabase.SaveAssets();
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogWarning("[master_ship] material asset generation failed: " + e.Message);
+        }
+    }
+#endif
+
+    private void SetWaterProps(Material m)
+    {
+        if (m == null) return;
+
         m.SetColor("_DeepColor", deepColor);
         m.SetColor("_CrestColor", crestColor);
         m.SetColor("_FoamColor", foamColor);
@@ -412,683 +546,253 @@ public class master_ship : MonoBehaviour
         m.SetFloat("_ReflectionStrength", reflectionStrength);
         m.SetFloat("_SunSpecPower", sunSpecPower);
         m.SetFloat("_SunSpecIntensity", sunSpecIntensity);
+        m.SetFloat("_GlitterAmount", 0.7f);
         m.SetFloat("_DetailStrength", detailStrength);
         m.SetFloat("_DetailScale", detailScale);
         m.SetFloat("_DetailSpeed", detailSpeed);
+        m.SetFloat("_DetailFadeDistance", 1400f);
         m.SetFloat("_FoamThreshold", foamThreshold);
         m.SetFloat("_FoamAmount", foamAmount);
+        m.SetFloat("_FoamScale", 0.09f);
+        m.SetFloat("_FoamScroll", 0.35f);
+        m.SetFloat("_ContactFoamStrength", contactFoamStrength);
+        m.SetFloat("_ContactFoamRange", 1.4f);
         m.SetFloat("_HullFoamStrength", hullFoamStrength);
         m.SetFloat("_HullFoamRadius", hullRadius);
         m.SetFloat("_WakeStrength", wakeStrength);
-        m.SetFloat("_WakeLength", Mathf.Max(20f, localBounds.size.z * 4f));
-        m.SetFloat("_WakeWidth", Mathf.Max(4f, localBounds.extents.x * 1.6f));
+        m.SetFloat("_WakeLength", Mathf.Max(60f, localBounds.size.z * 5f));
+        m.SetFloat("_WakeWidth", Mathf.Max(4f, localBounds.extents.x * 0.9f));
         m.SetFloat("_SubsurfaceStrength", subsurfaceStrength);
-        m.SetFloat("_DetailFadeDistance", 1200f);
+        m.SetFloat("_SSSPower", 6f);
+        m.SetFloat("_AbsorptionDepth", absorptionDepth);
+        m.SetFloat("_RefractionStrength", refractionStrength);
     }
 
-    Material CreateFallbackMaterial(bool transparent)
+    private Material CreateFallbackMaterial()
     {
         Shader urp = Shader.Find("Universal Render Pipeline/Lit");
-        Shader standard = Shader.Find("Standard");
-        Shader chosen = urp != null ? urp : standard;
+        Shader chosen = urp != null ? urp : Shader.Find("Standard");
         if (chosen == null) chosen = Shader.Find("Unlit/Color");
         if (chosen == null) return null;
 
-        Material mat = new Material(chosen);
-        Color c = new Color(deepColor.r, deepColor.g, deepColor.b, transparent ? 0.92f : 1f);
-
+        var mat = new Material(chosen);
+        var c = new Color(deepColor.r, deepColor.g, deepColor.b, 1f);
         if (mat.HasProperty("_BaseColor")) mat.SetColor("_BaseColor", c);
         if (mat.HasProperty("_Color")) mat.SetColor("_Color", c);
         if (mat.HasProperty("_Smoothness")) mat.SetFloat("_Smoothness", 0.95f);
-        if (mat.HasProperty("_Glossiness")) mat.SetFloat("_Glossiness", 0.95f);
-
         return mat;
     }
 
-    void CreateNearWater()
+    // ================= WATER RINGS =================
+
+    private void CreateWaterRings()
     {
-        string name = "AutoGenerated_Ocean_Near";
-        GameObject water = GameObject.Find(name);
+        DestroyLegacy("AutoGenerated_Ocean");
+        DestroyLegacy("AutoGenerated_Ocean_Near");
+        DestroyLegacy("AutoGenerated_Ocean_Mid");
+        DestroyLegacy("AutoGenerated_Ocean_Horizon");
 
-        MeshFilter mf;
-        MeshRenderer mr;
+        // Cell-size floors keep vertex density able to resolve the shortest waves.
+        int nearRes = Mathf.Max(nearRingResolution, Mathf.CeilToInt(nearRingSize / 1.6f));
+        nearRes = Mathf.Clamp(nearRes, 32, 512);
+        float midSizeFloor = Mathf.Max(waterSize, nearRingSize * 2f);
+        int midRes = Mathf.Max(waterResolution, Mathf.CeilToInt(midSizeFloor / 12f));
+        midRes = Mathf.Clamp(midRes, 32, 384);
 
-        if (water == null)
-        {
-            water = new GameObject(name);
-            mf = water.AddComponent<MeshFilter>();
-            mr = water.AddComponent<MeshRenderer>();
-        }
-        else
-        {
-            mf = water.GetComponent<MeshFilter>();
-            if (mf == null) mf = water.AddComponent<MeshFilter>();
-            mr = water.GetComponent<MeshRenderer>();
-            if (mr == null) mr = water.AddComponent<MeshRenderer>();
-        }
+        nearCell = OceanGridBuilder.CellSize(nearRes, nearRingSize);
+        midCell = OceanGridBuilder.CellSize(midRes, midSizeFloor);
 
-        nearTransform = water.transform;
-        nearTransform.rotation = Quaternion.identity;
-        nearTransform.position = new Vector3(transform.position.x, waterLevel, transform.position.z);
+        nearTransform = SpawnRing("AutoGenerated_Ocean_Near",
+            OceanGridBuilder.BuildRing(nearRes, nearRingSize, true, 1f, "ProceduralOceanNear"), 0f);
 
-        nearMesh = mf.sharedMesh;
-        if (nearMesh == null || nearMesh.name != "ProceduralOceanNear")
-        {
-            nearMesh = new Mesh();
-            nearMesh.name = "ProceduralOceanNear";
-            nearMesh.MarkDynamic();
-        }
-        else
-        {
-            nearMesh.Clear();
-        }
+        midTransform = SpawnRing("AutoGenerated_Ocean_Mid",
+            OceanGridBuilder.BuildRing(midRes, midSizeFloor, true, 0.7f, "ProceduralOceanMid"), -0.02f);
 
-        int res = Mathf.Clamp(waterResolution, 8, 160);
-        float size = Mathf.Max(100f, waterSize);
-
-        BuildGridMesh(nearMesh, res, size, true);
-
-        nearVertices = nearMesh.vertices;
-        nearColors = nearMesh.colors;
-
-        mf.sharedMesh = nearMesh;
-        mr.sharedMaterial = nearMat;
+        horizonTransform = SpawnRing("AutoGenerated_Ocean_Horizon",
+            OceanGridBuilder.BuildRing(2, horizonWaterSize, false, 0f, "ProceduralOceanHorizon"), -0.15f);
     }
 
-    void CreateHorizonWater()
+    private Transform SpawnRing(string name, Mesh mesh, float yOffset)
     {
-        string name = "AutoGenerated_Ocean_Horizon";
-        GameObject horizon = GameObject.Find(name);
+        var go = new GameObject(name);
+        go.layer = WaterPlanarReflections.WaterLayer;
 
-        MeshFilter mf;
-        MeshRenderer mr;
+        var mf = go.AddComponent<MeshFilter>();
+        mf.sharedMesh = mesh;
 
-        if (horizon == null)
-        {
-            horizon = new GameObject(name);
-            mf = horizon.AddComponent<MeshFilter>();
-            mr = horizon.AddComponent<MeshRenderer>();
-        }
-        else
-        {
-            Collider col = horizon.GetComponent<Collider>();
-            if (col != null) Destroy(col);
+        var mr = go.AddComponent<MeshRenderer>();
+        mr.sharedMaterial = waterMat;
+        mr.shadowCastingMode = ShadowCastingMode.Off;
+        mr.receiveShadows = false;
+        mr.lightProbeUsage = LightProbeUsage.Off;
+        mr.reflectionProbeUsage = ReflectionProbeUsage.Off;
+        mr.motionVectorGenerationMode = MotionVectorGenerationMode.ForceNoMotion;
 
-            mf = horizon.GetComponent<MeshFilter>();
-            if (mf == null) mf = horizon.AddComponent<MeshFilter>();
-            mr = horizon.GetComponent<MeshRenderer>();
-            if (mr == null) mr = horizon.AddComponent<MeshRenderer>();
-        }
-
-        horizonTransform = horizon.transform;
-        horizonTransform.rotation = Quaternion.identity;
-        horizonTransform.localScale = Vector3.one;
-        horizonTransform.position = new Vector3(transform.position.x, waterLevel - 0.05f, transform.position.z);
-
-        Mesh horizonMesh = mf.sharedMesh;
-        if (horizonMesh == null || horizonMesh.name != "ProceduralOceanHorizon")
-        {
-            horizonMesh = new Mesh();
-            horizonMesh.name = "ProceduralOceanHorizon";
-        }
-        else
-        {
-            horizonMesh.Clear();
-        }
-
-        BuildGridMesh(horizonMesh, 2, Mathf.Max(100f, horizonWaterSize), true);
-
-        mf.sharedMesh = horizonMesh;
-        mr.sharedMaterial = horizonMat;
+        go.transform.position = new Vector3(transform.position.x, waterLevel + yOffset, transform.position.z);
+        return go.transform;
     }
 
-    void BuildGridMesh(Mesh mesh, int res, float size, bool withColors)
+    private static void DestroyLegacy(string name)
     {
-        int vertCount = (res + 1) * (res + 1);
-        Vector3[] verts = new Vector3[vertCount];
-        Vector2[] uvs = new Vector2[vertCount];
-        Color[] cols = new Color[vertCount];
-        int[] triangles = new int[res * res * 6];
+        var old = GameObject.Find(name);
+        if (old != null) Destroy(old);
+    }
 
-        int vi = 0, ti = 0;
+    private void FollowWaterRings()
+    {
+        if (!waterFollowsShip) return;
 
-        for (int z = 0; z <= res; z++)
+        Vector3 p = transform.position;
+        if (nearTransform != null) nearTransform.position = Snap(p, nearCell, waterLevel);
+        if (midTransform != null) midTransform.position = Snap(p, midCell, waterLevel - 0.02f);
+        if (horizonTransform != null) horizonTransform.position = Snap(p, horizonWaterSize, waterLevel - 0.15f);
+    }
+
+    /// <summary>Snap ring centers to their vertex lattice so cells never "swim".</summary>
+    private static Vector3 Snap(Vector3 pos, float cell, float y)
+    {
+        cell = Mathf.Max(0.01f, cell);
+        return new Vector3(Mathf.Round(pos.x / cell) * cell, y, Mathf.Round(pos.z / cell) * cell);
+    }
+
+    private void PushShipUniforms()
+    {
+        if (!usingCustomShader || waterMat == null) return;
+
+        float speed01 = Speed01;
+        waterMat.SetVector("_ShipData", new Vector4(transform.position.x, transform.position.z, hullRadius, speed01));
+
+        Vector3 fwd = transform.forward;
+        fwd.y = 0f;
+        if (fwd.sqrMagnitude < 1e-6f) fwd = Vector3.forward;
+        fwd.Normalize();
+        waterMat.SetVector("_ShipForward", new Vector4(fwd.x, fwd.z, 0f, 0f));
+    }
+
+    // ================= BOUNDS =================
+
+    private void CalculateLocalBounds()
+    {
+        bool found = false;
+
+        Renderer[] renderers = GetComponentsInChildren<Renderer>();
+        if (renderers.Length > 0)
         {
-            for (int x = 0; x <= res; x++)
+            Bounds worldBounds = renderers[0].bounds;
+            for (int i = 1; i < renderers.Length; i++)
+                worldBounds.Encapsulate(renderers[i].bounds);
+
+            localBounds = new Bounds(transform.InverseTransformPoint(worldBounds.center), Vector3.zero);
+            foreach (Renderer r in renderers)
+                EncapsulateWorldBounds(ref localBounds, r.bounds);
+            found = true;
+        }
+        else
+        {
+            Collider[] colliders = GetComponentsInChildren<Collider>();
+            if (colliders.Length > 0)
             {
-                float px = (x / (float)res - 0.5f) * size;
-                float pz = (z / (float)res - 0.5f) * size;
+                Bounds worldBounds = colliders[0].bounds;
+                for (int i = 1; i < colliders.Length; i++)
+                    worldBounds.Encapsulate(colliders[i].bounds);
 
-                verts[vi] = new Vector3(px, 0f, pz);
-                uvs[vi] = new Vector2(x / (float)res, z / (float)res);
-                cols[vi] = Color.clear;
+                localBounds = new Bounds(transform.InverseTransformPoint(worldBounds.center), Vector3.zero);
+                foreach (Collider c in colliders)
+                    EncapsulateWorldBounds(ref localBounds, c.bounds);
+                found = true;
+            }
+        }
 
-                if (x < res && z < res)
+        if (!found || localBounds.size.sqrMagnitude < 0.01f)
+            localBounds = new Bounds(Vector3.zero, new Vector3(14f, 8f, 60f));
+    }
+
+    private void EncapsulateWorldBounds(ref Bounds localBoundsToFill, Bounds worldBounds)
+    {
+        Vector3 center = worldBounds.center;
+        Vector3 extents = worldBounds.extents;
+
+        for (int x = -1; x <= 1; x += 2)
+            for (int y = -1; y <= 1; y += 2)
+                for (int z = -1; z <= 1; z += 2)
                 {
-                    int a = z * (res + 1) + x;
-                    int b = a + 1;
-                    int c = a + (res + 1);
-                    int d = c + 1;
-
-                    triangles[ti++] = a; triangles[ti++] = c; triangles[ti++] = b;
-                    triangles[ti++] = b; triangles[ti++] = c; triangles[ti++] = d;
+                    Vector3 corner = center + new Vector3(extents.x * x, extents.y * y, extents.z * z);
+                    localBoundsToFill.Encapsulate(transform.InverseTransformPoint(corner));
                 }
-
-                vi++;
-            }
-        }
-
-        mesh.vertices = verts;
-        mesh.uv = uvs;
-        if (withColors) mesh.colors = cols;
-        mesh.triangles = triangles;
-        mesh.RecalculateNormals();
-        mesh.RecalculateBounds();
     }
 
-    // ================= SHADER ASSET GENERATION (EDITOR) =================
+    // ================= HUD =================
 
-#if UNITY_EDITOR
-    void EnsureWaterShaderAsset()
+    private void BuildHudStyle()
     {
-        if (File.Exists(SHADER_PATH) && File.Exists(MAT_PATH)) return;
-
-        if (!AssetDatabase.IsValidFolder(SHADER_DIR))
-            AssetDatabase.CreateFolder("Assets", "AutoGeneratedWater");
-
-        if (!AssetDatabase.IsValidFolder(SHADER_RES_DIR))
-            AssetDatabase.CreateFolder(SHADER_DIR, "Resources");
-
-        if (!File.Exists(SHADER_PATH))
+        hudStyle = new GUIStyle(GUI.skin.box)
         {
-            File.WriteAllText(SHADER_PATH, WATER_SHADER_SOURCE);
-            AssetDatabase.ImportAsset(SHADER_PATH, ImportAssetOptions.ForceSynchronousImport);
-        }
-
-        Shader sh = AssetDatabase.LoadAssetAtPath<Shader>(SHADER_PATH);
-        if (sh == null || !sh.isSupported) return;
-
-        if (!File.Exists(MAT_PATH))
-        {
-            Material m = new Material(sh);
-            m.name = "AutoOceanWaterMat";
-            AssetDatabase.CreateAsset(m, MAT_PATH);
-            AssetDatabase.SaveAssets();
-        }
+            alignment = TextAnchor.UpperLeft,
+            fontSize = 13,
+            fontStyle = FontStyle.Normal,
+            padding = new RectOffset(10, 10, 8, 8),
+            wordWrap = false
+        };
+        hudStyle.normal.textColor = new Color(0.85f, 0.93f, 1f, 0.95f);
     }
-#endif
 
-    // ================= SIM =================
-
-    void FixedUpdate()
+    private void OnGUI()
     {
-        BuildWaves(false);
-        HandleStableShip();
+        if (!showTelemetryHud || !initialized || !Application.isPlaying) return;
+        if (hudStyle == null) BuildHudStyle();
+        if (hudStyle == null) return;
+
+        float heading = Mathf.Repeat(shipYaw, 360f);
+        string throttleState = brakeText();
+        string rudderState = Mathf.Abs(currentRudder) < 0.02f ? "MIDSHIPS" :
+            $"{Mathf.Abs(currentRudder) * 35f:0}° {(currentRudder > 0 ? "STBD" : "PORT")}";
+
+        string text =
+            $"<b>TFOU // {name}</b>\n" +
+            $"SPEED   {Mathf.Abs(SpeedKnots):00.0} kn   ({throttleState})\n" +
+            $"HEADING {heading:000}°\n" +
+            $"RUDDER  {rudderState}\n" +
+            $"SEA     Beaufort {seaState:0.0}  wind {windDirectionDeg:0}°\n" +
+            $"CAM     {CamModeName()}   zoom wheel · C cycle\n" +
+            $"<size=11>W/S engine · A/D rudder · Shift flank · Space brake · O/P sea state · F hud</size>";
+
+        GUI.Box(new Rect(12, 12, 330, 128), text, hudStyle);
     }
 
-    void LateUpdate()
+    private string brakeText()
     {
-        UpdateWaterVisual();
-        HandleCamera();
+        if (ShipInput.Brake()) return "ALL STOP";
+        if (currentSpeed > 0.5f)
+            return ShipInput.Boost() ? "FLANK" : $"AHEAD {Mathf.Clamp01(currentSpeed / maxSpeed) * 100f:0}%";
+        if (currentSpeed < -0.5f) return "ASTERNS";
+        return "STOPPED";
     }
 
-    void HandleStableShip()
+    private string CamModeName() => camRig != null ? camRig.CurrentMode.ToString().ToUpper() : "-";
+
+    // ================= EDITOR =================
+
+    private void OnValidate()
     {
-        if (rb == null) return;
+        maxSpeed = Mathf.Max(1f, maxSpeed);
+        nearRingSize = Mathf.Clamp(nearRingSize, 100f, 4000f);
 
-        float dt = Time.fixedDeltaTime;
+        if (!Application.isPlaying || !initialized) return;
 
-        float throttle = GetVerticalInput();
-        float steer = GetHorizontalInput();
-
-        float targetSpeed = 0f;
-        if (throttle > 0.01f) targetSpeed = maxSpeed;
-        else if (throttle < -0.01f) targetSpeed = -maxReverseSpeed;
-
-        float rate = Mathf.Abs(throttle) > 0.01f ? acceleration : deceleration;
-        currentSpeed = Mathf.MoveTowards(currentSpeed, targetSpeed, rate * dt);
-        currentRudder = Mathf.MoveTowards(currentRudder, steer, rudderResponsiveness * dt);
-
-        Vector3 center = transform.position;
-        float surfaceHeight = waterLevel + GetWaveHeight(center.x, center.z);
-
-        float draft = Mathf.Clamp(localBounds.size.y * 0.22f, 0.5f, 8f);
-        float rawTargetY = surfaceHeight - draft - localBounds.min.y;
-
-        if (!floatingInitialized)
-        {
-            smoothedTargetY = rawTargetY;
-            floatingInitialized = true;
-        }
-
-        smoothedTargetY = Mathf.MoveTowards(smoothedTargetY, rawTargetY, bobFollowSpeed * dt);
-
-        float verticalVel = Mathf.Clamp(
-            (smoothedTargetY - transform.position.y) * verticalSpring,
-            -maxVerticalSpeed, maxVerticalSpeed);
-
-        Vector3 currentVel = rb.linearVelocity;
-        Vector3 horizontalVel = new Vector3(currentVel.x, 0f, currentVel.z);
-
-        Vector3 targetHorizontalVel = transform.forward * currentSpeed;
-        targetHorizontalVel.y = 0f;
-
-        Vector3 newHorizontalVel = Vector3.MoveTowards(horizontalVel, targetHorizontalVel, propulsionForce * dt);
-        rb.linearVelocity = new Vector3(newHorizontalVel.x, verticalVel, newHorizontalVel.z);
-
-        // wave tilt from the SAME gerstner math
-        SampleGerstner(center.x, center.z, Time.time, out _, out _, out _, out float nx, out float ny, out float nz);
-        Vector3 waveNormal = new Vector3(nx, ny, nz);
-        Vector3 desiredUp = Vector3.Slerp(Vector3.up, waveNormal, tiltInfluence).normalized;
-        smoothedWaterUp = Vector3.Slerp(smoothedWaterUp, desiredUp, tiltSmooth * dt).normalized;
-
-        float absSpeed = Mathf.Abs(currentSpeed);
-        float speedRatio = Mathf.Clamp01(absSpeed / maxSpeed);
-        float moveFactor = Mathf.Clamp01(absSpeed / 2f);
-        float turnPenalty = 1f - highSpeedTurnPenalty * speedRatio;
-
-        float turnRateDeg = -currentRudder * maxTurnRate * moveFactor * turnPenalty;
-        shipYaw += turnRateDeg * dt;
-        shipYaw = Mathf.Repeat(shipYaw + 180f, 360f) - 180f;
-
-        Vector3 forwardYaw = Quaternion.Euler(0f, shipYaw, 0f) * Vector3.forward;
-        Vector3 forwardOnWater = Vector3.ProjectOnPlane(forwardYaw, smoothedWaterUp).normalized;
-        if (forwardOnWater.sqrMagnitude < 0.0001f) forwardOnWater = transform.forward;
-
-        Quaternion waterRot = Quaternion.LookRotation(forwardOnWater, smoothedWaterUp);
-
-        float heelAuthority = Mathf.Clamp01(absSpeed / 8f + 0.1f);
-        float targetHeel = -currentRudder * heelAuthority * turnHeelDegrees;
-        float targetPitch = -throttle * accelPitchDegrees;
-
-        smoothedHeel = Mathf.MoveTowards(smoothedHeel, targetHeel, heelSmooth * dt);
-        smoothedPitch = Mathf.MoveTowards(smoothedPitch, targetPitch, pitchSmooth * dt);
-
-        Quaternion targetRot = waterRot * Quaternion.Euler(smoothedPitch, 0f, smoothedHeel);
-        Quaternion newRot = Quaternion.Slerp(rb.rotation, targetRot, rotationSmooth * dt);
-        rb.MoveRotation(newRot);
-
-        shipYaw = Mathf.Repeat(newRot.eulerAngles.y + 180f, 360f) - 180f;
+        SetupOceanWaves();
+        SetWaterProps(waterMat);
+        if (buoyancy != null)
+            buoyancy.ConfigureFrom(localBounds, verticalSpring, bobFollowSpeed, maxVerticalSpeed, tiltInfluence, tiltSmooth);
+        SetupCameraRig();
+        ApplyQualityTier();
+        if (autoSetupFog) SetupFog();
     }
 
-    void UpdateWaterVisual()
+    private void OnDrawGizmosSelected()
     {
-        if (waterFollowsShip)
-        {
-            if (nearTransform != null)
-                nearTransform.position = new Vector3(transform.position.x, waterLevel, transform.position.z);
-
-            if (horizonTransform != null)
-                horizonTransform.position = new Vector3(transform.position.x, waterLevel - 0.05f, transform.position.z);
-        }
-
-        if (nearMesh != null && nearVertices != null && nearColors != null && nearTransform != null)
-        {
-            float t = Time.time;
-            Vector3 wp = nearTransform.position;
-            float halfSize = Mathf.Max(1f, waterSize * 0.5f);
-            float totalAmp = Mathf.Max(0.001f, waveAmplitude);
-
-            for (int i = 0; i < nearVertices.Length; i++)
-            {
-                float bx = nearVertices[i].x;
-                float bz = nearVertices[i].z;
-
-                // NOTE: bx/bz keep their base grid values because we recompute from base each frame.
-                float wx = wp.x + bx;
-                float wz = wp.z + bz;
-
-                SampleGerstner(wx, wz, t, out float h, out float dx, out float dz, out _, out _, out _);
-
-                float radial = Mathf.Sqrt(bx * bx + bz * bz) / halfSize;
-                float fade = 1f - Mathf.SmoothStep(0.8f, 1f, radial);
-
-                nearVertices[i].y = h * fade;
-                // horizontal gerstner displacement (x/z stored offsets would accumulate, so we
-                // re-derive from base grid: base grid is rebuilt only on resize, so we store base in uv)
-                float baseX = (nearMesh.uv[i].x - 0.5f) * waterSize;
-                float baseZ = (nearMesh.uv[i].y - 0.5f) * waterSize;
-                nearVertices[i].x = baseX + dx * fade;
-                nearVertices[i].z = baseZ + dz * fade;
-
-                float crest = Mathf.Clamp01(h / totalAmp * 0.5f + 0.5f);
-                float foamMask = Mathf.SmoothStep(0.62f, 0.92f, crest);
-
-                nearColors[i].r = foamMask;
-                nearColors[i].g = crest;
-                nearColors[i].b = 0f;
-                nearColors[i].a = 1f;
-            }
-
-            nearMesh.vertices = nearVertices;
-            nearMesh.colors = nearColors;
-            nearMesh.RecalculateNormals();
-            nearMesh.RecalculateBounds();
-        }
-
-        if (usingCustomShader && nearMat != null && horizonMat != null)
-        {
-            float speed01 = Mathf.Clamp01(Mathf.Abs(currentSpeed) / Mathf.Max(1f, maxSpeed));
-            Vector4 shipData = new Vector4(transform.position.x, transform.position.z, hullRadius, speed01);
-            Vector3 fwd = transform.forward; fwd.y = 0f; fwd.Normalize();
-            Vector4 shipFwd = new Vector4(fwd.x, fwd.z, 0f, 0f);
-
-            nearMat.SetVector("_ShipData", shipData);
-            nearMat.SetVector("_ShipForward", shipFwd);
-            horizonMat.SetVector("_ShipData", shipData);
-            horizonMat.SetVector("_ShipForward", shipFwd);
-        }
+        Gizmos.color = new Color(0.2f, 0.8f, 1f, 0.4f);
+        Gizmos.matrix = transform.localToWorldMatrix;
+        Gizmos.DrawWireCube(localBounds.center, localBounds.size);
+        Gizmos.matrix = Matrix4x4.identity;
     }
-
-    void HandleCamera()
-    {
-        if (mainCam == null)
-        {
-            EnsureCamera();
-            if (mainCam == null) return;
-        }
-
-        Vector3 pivot = transform.TransformPoint(cameraPivotOffset);
-
-        bool orbiting = GetOrbitButton();
-
-        if (orbiting)
-        {
-            Vector2 mouseDelta = GetMouseDeltaInput();
-            camYaw += mouseDelta.x * cameraOrbitSpeed * 0.08f;
-            camPitch -= mouseDelta.y * cameraOrbitSpeed * 0.08f;
-        }
-        else if (cameraAutoFollowShipYaw)
-        {
-            float followSpeed = isTactical ? yawFollowSpeed * 0.5f : yawFollowSpeed;
-            camYaw = Mathf.LerpAngle(camYaw, shipYaw, Time.deltaTime * followSpeed);
-        }
-
-        camPitch = Mathf.Clamp(camPitch, minPitch, maxPitch);
-
-        float scroll = GetScrollInput();
-        if (Mathf.Abs(scroll) > 0.001f)
-        {
-            targetDistance -= scroll * cameraZoomSpeed;
-            targetDistance = Mathf.Clamp(targetDistance, minDistance, tacticalDistance + 50f);
-        }
-
-        if (GetCameraToggleDown())
-        {
-            isTactical = !isTactical;
-            targetDistance = isTactical ? tacticalDistance : defaultDistance;
-            if (isTactical) camPitch = Mathf.Max(camPitch, 55f);
-        }
-
-        currentDistance = Mathf.Lerp(currentDistance, targetDistance, Time.deltaTime * 4f);
-
-        float speedRatio = Mathf.Clamp01(Mathf.Abs(currentSpeed) / Mathf.Max(1f, maxSpeed));
-        mainCam.fieldOfView = Mathf.Lerp(mainCam.fieldOfView, Mathf.Lerp(baseFOV, maxSpeedFOV, speedRatio), Time.deltaTime * 3f);
-
-        Quaternion orbitRot = Quaternion.Euler(camPitch, camYaw, 0f);
-        Vector3 desiredPos = pivot - (orbitRot * Vector3.forward * currentDistance);
-
-        float lagOffset = Mathf.Clamp(-currentRudder * speedRatio * 6f, -10f, 10f);
-        desiredPos += transform.right * lagOffset;
-
-        Vector3 dir = desiredPos - pivot;
-        float dist = dir.magnitude;
-
-        if (dist < 0.01f) { dir = -transform.forward; dist = currentDistance; }
-        else dir /= dist;
-
-        float allowedDist = dist;
-        Ray ray = new Ray(pivot, dir);
-        RaycastHit[] hits = Physics.SphereCastAll(ray, 1.2f, dist, ~0, QueryTriggerInteraction.Ignore);
-
-        float nearest = Mathf.Infinity;
-        foreach (RaycastHit hit in hits)
-        {
-            if (hit.collider == null) continue;
-            if (hit.collider.transform == transform) continue;
-            if (hit.collider.transform.IsChildOf(transform)) continue;
-            if (hit.distance > 0.5f && hit.distance < nearest) nearest = hit.distance;
-        }
-        if (nearest < Mathf.Infinity) allowedDist = Mathf.Max(2f, nearest - 1.5f);
-
-        Vector3 finalPos = pivot + dir * Mathf.Min(dist, allowedDist);
-        mainCam.transform.position = Vector3.SmoothDamp(mainCam.transform.position, finalPos, ref camPosVel, 0.18f);
-
-        Quaternion lookRot = Quaternion.LookRotation(pivot - mainCam.transform.position);
-        mainCam.transform.rotation = Quaternion.Slerp(mainCam.transform.rotation, lookRot, Time.deltaTime * 8f);
-    }
-
-    // ================= INPUT =================
-
-    float GetVerticalInput()
-    {
-        float v = 0f;
-        var kb = Keyboard.current;
-        if (kb != null)
-        {
-            if (kb.wKey.isPressed || kb.upArrowKey.isPressed) v += 1f;
-            if (kb.sKey.isPressed || kb.downArrowKey.isPressed) v -= 1f;
-        }
-        var gp = Gamepad.current;
-        if (gp != null) v += gp.leftStick.y.ReadValue();
-        return Mathf.Clamp(v, -1f, 1f);
-    }
-
-    float GetHorizontalInput()
-    {
-        float h = 0f;
-        var kb = Keyboard.current;
-        if (kb != null)
-        {
-            if (kb.dKey.isPressed || kb.rightArrowKey.isPressed) h += 1f;
-            if (kb.aKey.isPressed || kb.leftArrowKey.isPressed) h -= 1f;
-        }
-        var gp = Gamepad.current;
-        if (gp != null) h += gp.leftStick.x.ReadValue();
-        return Mathf.Clamp(h, -1f, 1f);
-    }
-
-    bool GetOrbitButton()
-    {
-        var m = Mouse.current;
-        return m != null && m.rightButton.isPressed;
-    }
-
-    Vector2 GetMouseDeltaInput()
-    {
-        var m = Mouse.current;
-        return m != null ? m.delta.ReadValue() : Vector2.zero;
-    }
-
-    float GetScrollInput()
-    {
-        var m = Mouse.current;
-        return m != null ? Mathf.Clamp(m.scroll.ReadValue().y / 120f, -1f, 1f) : 0f;
-    }
-
-    bool GetCameraToggleDown()
-    {
-        var kb = Keyboard.current;
-        return kb != null && (kb.cKey.wasPressedThisFrame || kb.tabKey.wasPressedThisFrame);
-    }
-
-    // ================= THE GENERATED URP OCEAN SHADER =================
-
-    private const string WATER_SHADER_SOURCE = @"Shader ""Custom/AutoOceanWater""
-{
-    Properties
-    {
-        _DeepColor(""Deep Color"", Color) = (0.008, 0.09, 0.16, 1)
-        _CrestColor(""Crest Color"", Color) = (0.02, 0.22, 0.30, 1)
-        _FoamColor(""Foam Color"", Color) = (0.92, 0.97, 1, 1)
-        _HorizonSkyColor(""Horizon Sky Color"", Color) = (0.45, 0.62, 0.72, 1)
-        _ZenithSkyColor(""Zenith Sky Color"", Color) = (0.10, 0.28, 0.55, 1)
-        _SubsurfaceColor(""Subsurface Color"", Color) = (0.05, 0.45, 0.42, 1)
-        _FresnelPower(""Fresnel Power"", Range(0.5, 8)) = 3
-        _ReflectionStrength(""Reflection Strength"", Range(0, 2)) = 1
-        _SunSpecPower(""Sun Specular Power"", Range(8, 2048)) = 256
-        _SunSpecIntensity(""Sun Specular Intensity"", Range(0, 8)) = 2
-        _DetailStrength(""Detail Normal Strength"", Range(0, 2)) = 0.5
-        _DetailScale(""Detail Scale"", Range(0.01, 4)) = 0.35
-        _DetailSpeed(""Detail Speed"", Range(0, 4)) = 1
-        _FoamThreshold(""Crest Foam Threshold"", Range(0, 1)) = 0.55
-        _FoamAmount(""Foam Amount"", Range(0, 3)) = 1.2
-        _HullFoamStrength(""Hull Foam Strength"", Range(0, 3)) = 1.4
-        _HullFoamRadius(""Hull Foam Radius"", Range(1, 300)) = 40
-        _WakeStrength(""Wake Strength"", Range(0, 3)) = 1.2
-        _WakeLength(""Wake Length"", Range(10, 800)) = 220
-        _WakeWidth(""Wake Width"", Range(1, 100)) = 18
-        _SubsurfaceStrength(""Subsurface Strength"", Range(0, 3)) = 0.5
-        _DetailFadeDistance(""Detail Fade Distance"", Range(50, 5000)) = 1200
-    }
-    SubShader
-    {
-        Tags { ""RenderType""=""Opaque"" ""Queue""=""Geometry"" }
-        LOD 100
-
-        Pass
-        {
-            Name ""ForwardLit""
-            Tags { ""LightMode""=""UniversalForward"" }
-
-            HLSLPROGRAM
-            #pragma vertex vert
-            #pragma fragment frag
-            #pragma multi_compile_fog
-
-            #include ""Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl""
-            #include ""Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl""
-
-            CBUFFER_START(UnityPerMaterial)
-                half4 _DeepColor;
-                half4 _CrestColor;
-                half4 _FoamColor;
-                half4 _HorizonSkyColor;
-                half4 _ZenithSkyColor;
-                half4 _SubsurfaceColor;
-                float _FresnelPower;
-                half _ReflectionStrength;
-                float _SunSpecPower;
-                half _SunSpecIntensity;
-                half _DetailStrength;
-                half _DetailScale;
-                half _DetailSpeed;
-                half _FoamThreshold;
-                half _FoamAmount;
-                half _HullFoamStrength;
-                half _HullFoamRadius;
-                half _WakeStrength;
-                half _WakeLength;
-                half _WakeWidth;
-                half _SubsurfaceStrength;
-                half _DetailFadeDistance;
-                float4 _ShipData;
-                float4 _ShipForward;
-            CBUFFER_END
-
-            struct Attributes
-            {
-                float4 positionOS : POSITION;
-                float2 uv : TEXCOORD0;
-                float4 color : COLOR;
-            };
-
-            struct Varyings
-            {
-                float4 positionCS : SV_POSITION;
-                float3 positionWS : TEXCOORD0;
-                float2 uv : TEXCOORD1;
-                float2 crest : TEXCOORD2;
-                float fogFactor : TEXCOORD3;
-            };
-
-            float DetailH(float2 p, float t)
-            {
-                float h = sin(p.x * 1.0 + t * 1.7) * 0.50;
-                h += sin(p.y * 1.3 - t * 1.1) * 0.40;
-                h += sin((p.x + p.y) * 0.7 + t * 2.3) * 0.30;
-                h += sin((p.x - p.y) * 2.1 - t * 1.9) * 0.20;
-                h += sin(p.x * 3.9 + p.y * 3.1 + t * 3.3) * 0.10;
-                return h;
-            }
-
-            Varyings vert(Attributes v)
-            {
-                Varyings o;
-                float3 positionWS = TransformObjectToWorld(v.positionOS.xyz);
-                o.positionWS = positionWS;
-                o.positionCS = TransformWorldToHClip(positionWS);
-                o.uv = v.uv;
-                o.crest = v.color.rg;
-                o.fogFactor = ComputeFogFactor(o.positionCS.z);
-                return o;
-            }
-
-            half4 frag(Varyings i) : SV_Target
-            {
-                float3 positionWS = i.positionWS;
-                float3 camPos = GetCameraPositionWS();
-                float3 V = normalize(camPos - positionWS);
-
-                float dist = distance(camPos, positionWS);
-                float detailFade = saturate(1.0 - dist / max(_DetailFadeDistance, 1.0));
-
-                float2 p = positionWS.xz * _DetailScale;
-                float t = _Time.y * _DetailSpeed;
-
-                float e = 0.4;
-                float h0 = DetailH(p, t);
-                float hx = DetailH(p + float2(e, 0.0), t);
-                float hz = DetailH(p + float2(0.0, e), t);
-                float3 detailN = normalize(float3(-(hx - h0) / e, 1.0, -(hz - h0) / e));
-
-                float strength = _DetailStrength * (0.25 + 0.75 * detailFade);
-                float3 N = normalize(float3(detailN.xz * strength, 1.0));
-
-                float ndv = saturate(dot(N, V));
-                float fresnel = pow(1.0 - ndv, _FresnelPower);
-
-                float3 R = reflect(-V, N);
-                float skyT = saturate(R.y * 1.6 + 0.08);
-                half3 skyCol = lerp(_HorizonSkyColor.rgb, _ZenithSkyColor.rgb, skyT);
-
-                Light mainLight = GetMainLight();
-                half3 H = normalize(mainLight.direction + V);
-                float spec = pow(saturate(dot(N, H)), _SunSpecPower) * _SunSpecIntensity;
-
-                half3 waterCol = lerp(_DeepColor.rgb, _CrestColor.rgb, saturate(i.crest.g));
-
-                float sss = pow(saturate(dot(V, -mainLight.direction)), 3.0) * saturate(i.crest.g) * _SubsurfaceStrength;
-                waterCol += _SubsurfaceColor.rgb * sss;
-
-                half3 col = lerp(waterCol, skyCol, saturate(fresnel * _ReflectionStrength));
-                col += mainLight.color * spec;
-
-                float foamNoise = DetailH(p * 2.7 + 13.7, t * 0.55) * 0.5 + 0.5;
-                float crestFoam = smoothstep(_FoamThreshold, 1.0, i.crest.r) * _FoamAmount;
-                float foam = crestFoam * (0.55 + 0.9 * foamNoise);
-
-                float dShip = distance(positionWS.xz, _ShipData.xz);
-                float ring = smoothstep(_HullFoamRadius * 2.1, _HullFoamRadius * 0.75, dShip) * _HullFoamStrength;
-                foam += ring * (0.45 + 0.75 * foamNoise);
-
-                float2 fwd = normalize(_ShipForward.xz + 1e-5);
-                float2 toP = positionWS.xz - _ShipData.xz;
-                float along = clamp(dot(toP, -fwd), 0.0, _WakeLength);
-                float2 closest = _ShipData.xz - fwd * along;
-                float dWake = distance(positionWS.xz, closest);
-                float wakeFade = 1.0 - along / max(_WakeLength, 1.0);
-                float wake = smoothstep(_WakeWidth, _WakeWidth * 0.2, dWake) * wakeFade * wakeFade * _WakeStrength * _ShipData.w;
-                foam += wake * (0.35 + 0.85 * foamNoise);
-
-                col = lerp(col, _FoamColor.rgb, saturate(foam));
-
-                col = MixFog(col, i.fogFactor);
-                return half4(col, 1.0);
-            }
-            ENDHLSL
-        }
-    }
-}
-";
 }
