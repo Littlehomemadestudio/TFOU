@@ -92,6 +92,7 @@ namespace TFOU.Ship
                 case KeyCode.P: return kb.pKey.wasPressedThisFrame;
                 case KeyCode.F: return kb.fKey.wasPressedThisFrame;
                 case KeyCode.H: return kb.hKey.wasPressedThisFrame;
+                case KeyCode.R: return kb.rKey.wasPressedThisFrame;
                 default: return false;
             }
         }

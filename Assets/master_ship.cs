@@ -41,6 +41,15 @@ public class master_ship : MonoBehaviour, IShipState
     public float boostMultiplier = 1.28f;
     [Tooltip("Lateral slip when carving hard turns (0 = train tracks).")]
     [Range(0f, 0.6f)] public float driftFactor = 0.22f;
+    [Tooltip("Quadratic hydrodynamic drag while coasting (no throttle).")]
+    public float hydrodynamicDrag = 0.02f;
+    [Tooltip("Slow and shudder when the keel touches the seabed.")]
+    public bool enableGrounding = true;
+
+    [Header("=== TEST MAP ===")]
+    [Tooltip("Generate a procedural island + slalom-course test map at runtime.")]
+    public bool autoGenerateTestMap = true;
+    public int mapSeed = 1337;
 
     [Header("=== STEERING FEEL ===")]
     public float maxTurnRate = 20f;
@@ -157,6 +166,7 @@ public class master_ship : MonoBehaviour, IShipState
     private float shipYaw;
     private float smoothedHeel;
     private float smoothedPitch;
+    private bool grounded;
     private float hullRadius = 20f;
     private bool initialized;
 
@@ -175,6 +185,7 @@ public class master_ship : MonoBehaviour, IShipState
     public float HeelDegrees => smoothedHeel;
     public float SpeedKnots => currentSpeed * 1.94384f;
     public float EngineLoad01 => engineLoad;
+    public bool IsGrounded => grounded;
 
     // ================= LIFECYCLE =================
 
@@ -197,6 +208,14 @@ public class master_ship : MonoBehaviour, IShipState
         hullRadius = Mathf.Max(localBounds.extents.x, localBounds.extents.z) * 0.85f;
         cameraPivotOffset = localBounds.center + Vector3.up * localBounds.size.y * 0.25f;
 
+        // Hulls without colliders pass through the world; fit an invisible box.
+        if (GetComponentInChildren<Collider>() == null)
+        {
+            var box = gameObject.AddComponent<BoxCollider>();
+            box.center = localBounds.center;
+            box.size = Vector3.Scale(localBounds.size, new Vector3(0.8f, 0.85f, 0.92f));
+        }
+
         EnsureCamera();
         SetupOceanWaves();
         SetupMaterials();
@@ -204,6 +223,7 @@ public class master_ship : MonoBehaviour, IShipState
         SetupBuoyancy();
         SetupCameraRig();
         SetupEffects();
+        if (autoGenerateTestMap) TFOU.World.TestMapGenerator.Ensure(mapSeed, transform);
         ApplyQualityTier();
         if (autoSetupFog) SetupFog();
 
@@ -256,6 +276,11 @@ public class master_ship : MonoBehaviour, IShipState
         float rate = brake ? deceleration * 2.5f : (Mathf.Abs(throttle) > 0.01f ? acceleration : deceleration);
         currentSpeed = Mathf.MoveTowards(currentSpeed, targetSpeed, rate * dt);
 
+        // Hydrodynamic drag: coast down quadratically, not linearly.
+        if (Mathf.Abs(throttle) < 0.01f && !brake)
+            currentSpeed -= Mathf.Sign(currentSpeed) * hydrodynamicDrag * currentSpeed * currentSpeed * dt;
+        if (Mathf.Abs(currentSpeed) < 0.03f) currentSpeed = 0f;
+
         float loadTarget = Mathf.Clamp01(Mathf.Abs(currentSpeed) / Mathf.Max(1f, maxSpeed) + (boost && throttle > 0.5f ? 0.25f : 0f));
         engineLoad = Mathf.MoveTowards(engineLoad, loadTarget, dt * 0.8f);
 
@@ -270,7 +295,10 @@ public class master_ship : MonoBehaviour, IShipState
         float moveFactor = Mathf.Clamp01(absSpeed / 2f);
         float turnPenalty = 1f - highSpeedTurnPenalty * speedRatio;
 
-        float turnRateDeg = currentRudder * maxTurnRate * moveFactor * turnPenalty;
+        // Rudder effect reverses when making sternway, and hard turns scrub speed.
+        float steerSign = currentSpeed < -0.5f ? -1f : 1f;
+        float turnRateDeg = currentRudder * maxTurnRate * moveFactor * turnPenalty * steerSign;
+        currentSpeed *= 1f - Mathf.Clamp01(Mathf.Abs(turnRateDeg) / Mathf.Max(1f, maxTurnRate)) * speedRatio * 0.25f * dt;
         shipYaw += turnRateDeg * dt;
         shipYaw = Mathf.Repeat(shipYaw + 180f, 360f) - 180f;
 
@@ -307,7 +335,74 @@ public class master_ship : MonoBehaviour, IShipState
 
         Vector3 newHorizontal = Vector3.MoveTowards(horizontalVel, targetVel, propulsionForce * dt);
         float heave = buoyancy != null ? buoyancy.HeaveVelocity : 0f;
+
+        // Grounding: keel on the seabed -> stop sinking, scrub speed, shudder.
+        grounded = enableGrounding && CheckGrounding(out float seabedY);
+        if (grounded)
+        {
+            Vector3 keelP = transform.TransformPoint(new Vector3(localBounds.center.x, localBounds.min.y, localBounds.center.z));
+            float penetration = seabedY + 0.35f - keelP.y;
+            heave = penetration > 0f ? Mathf.Max(heave, penetration * 5f) : Mathf.Max(heave, 0f);
+            currentSpeed = Mathf.MoveTowards(currentSpeed, 0f, 8f * dt);
+            if (Mathf.Abs(currentSpeed) > 4f && camRig != null && Time.frameCount % 10 == 0)
+                camRig.AddShake(0.12f);
+        }
+
         rb.linearVelocity = new Vector3(newHorizontal.x, heave, newHorizontal.z);
+    }
+
+    private bool CheckGrounding(out float seabed)
+    {
+        seabed = float.NegativeInfinity;
+
+        Vector3 keelP = transform.TransformPoint(new Vector3(localBounds.center.x, localBounds.min.y, localBounds.center.z));
+        float maxD = transform.position.y + 4f - keelP.y + 12f;
+        if (maxD <= 0.5f) return false;
+
+        Vector3 fwdFlat = transform.forward;
+        fwdFlat.y = 0f;
+        if (fwdFlat.sqrMagnitude < 1e-6f) fwdFlat = Vector3.forward;
+        fwdFlat.Normalize();
+
+        float reach = localBounds.extents.z * 0.6f;
+        Vector3[] origins =
+        {
+            transform.position + fwdFlat * reach + Vector3.up * 4f,
+            transform.position + Vector3.up * 4f,
+            transform.position - fwdFlat * reach + Vector3.up * 4f
+        };
+
+        bool found = false;
+        var hits = new RaycastHit[8];
+        foreach (Vector3 o in origins)
+        {
+            int n = Physics.RaycastNonAlloc(o, Vector3.down, hits, maxD, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+            for (int i = 0; i < n; i++)
+            {
+                if (hits[i].collider == null) continue;
+                if (hits[i].collider.transform.IsChildOf(transform)) continue;
+                if (hits[i].point.y > seabed)
+                {
+                    seabed = hits[i].point.y;
+                    found = true;
+                }
+            }
+        }
+        return found && seabed > keelP.y - 0.8f;
+    }
+
+    private void OnCollisionEnter(Collision collision)
+    {
+        float impact = collision.relativeVelocity.magnitude;
+        if (impact < 1.5f) return;
+
+        // Impacts bleed speed and punch the camera; beaching at flank speed hurts.
+        currentSpeed *= Mathf.Max(0f, 1f - impact / 25f);
+        if (camRig != null)
+        {
+            camRig.AddShake(Mathf.Min(impact / 10f, 1.2f));
+            camRig.AddFovPunch(Mathf.Min(impact / 12f, 3f));
+        }
     }
 
     private void LateUpdate()
@@ -756,7 +851,10 @@ public class master_ship : MonoBehaviour, IShipState
             $"CAM     {CamModeName()}   zoom wheel · C cycle\n" +
             $"<size=11>W/S engine · A/D rudder · Shift flank · Space brake · O/P sea state · F hud</size>";
 
-        GUI.Box(new Rect(12, 12, 330, 128), text, hudStyle);
+        if (grounded)
+            text = "!! GROUNDED - ease astern off the seabed\n" + text;
+
+        GUI.Box(new Rect(12, 12, 330, grounded ? 148f : 128f), text, hudStyle);
     }
 
     private string brakeText()
