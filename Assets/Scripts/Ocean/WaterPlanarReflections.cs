@@ -165,7 +165,7 @@ namespace TFOU.Ocean
 
             // Mirrored winding: invert culling for the manual render only.
             _insideRender = true;
-            GL.invertCulling(true);
+            GL.invertCulling = true;
             try
             {
                 _reflectionCamera.Render();
@@ -176,7 +176,7 @@ namespace TFOU.Ocean
             }
             finally
             {
-                GL.invertCulling(false);
+                GL.invertCulling = false;
                 _insideRender = false;
             }
 

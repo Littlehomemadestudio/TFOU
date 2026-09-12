@@ -64,7 +64,7 @@ namespace TFOU.Ocean
                 profile.hideFlags = HideFlags.HideAndDontSave;
 
                 var tonemap = profile.Add<Tonemapping>(true);
-                tonemap.mode.Override(TonemappingMode.Aces);
+                tonemap.mode.Override(TonemappingMode.ACES);
 
                 var bloom = profile.Add<Bloom>(true);
                 bloom.threshold.Override(0.9f);

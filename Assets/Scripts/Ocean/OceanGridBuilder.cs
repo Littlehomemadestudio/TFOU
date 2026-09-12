@@ -73,9 +73,9 @@ namespace TFOU.Ocean
 
             // Vertices move in the vertex shader; pad bounds so the ring never gets
             // frustum-culled while its center is behind the camera.
-            var b = mesh.bounds;
-            b.size = new Vector3(b.size.x, 128f, b.size.z);
-            mesh.bounds = b;
+            var mb = mesh.bounds;
+            mb.size = new Vector3(mb.size.x, 128f, mb.size.z);
+            mesh.bounds = mb;
             return mesh;
         }
 
