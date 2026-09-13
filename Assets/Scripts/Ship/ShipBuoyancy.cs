@@ -42,6 +42,13 @@ namespace TFOU.Ship
         /// <summary>Fired on bow slam with normalized intensity 0..1.</summary>
         public event System.Action<float> OnBowSlam;
 
+        /// <summary>
+        /// Optional alternative water-surface source (world pos -> absolute surface Y).
+        /// Set to SuimonoBridge.GetSurfaceY to float the ship on Suimono 2 waves.
+        /// Null = sample the procedural OceanWaves field.
+        /// </summary>
+        public System.Func<Vector3, float> SurfaceOverride;
+
         // ---- smoothed outputs (read by master_ship) ----
         public float HeaveVelocity { get; private set; }
         public float TargetY { get; private set; }
@@ -114,7 +121,9 @@ namespace TFOU.Ship
             for (int i = 0; i < _pointsLocal.Length; i++)
             {
                 Vector3 wp = i == 0 ? centerWorld : transform.TransformPoint(_pointsLocal[i]);
-                float surf = waves != null ? waves.SurfaceY(wp.x, wp.z, t) : waterY;
+                float surf = SurfaceOverride != null
+                    ? SurfaceOverride(wp)
+                    : (waves != null ? waves.SurfaceY(wp.x, wp.z, t) : waterY);
                 _surfaceCache[i] = surf;
 
                 // Plane-fit accumulators in world-horizontal space around the center.

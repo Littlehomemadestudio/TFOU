@@ -31,6 +31,8 @@ public class master_ship : MonoBehaviour, IShipState
 {
     public enum QualityTier { Low, Medium, High, Ultra }
 
+    public enum WaterBackend { Auto, Procedural, Suimono }
+
     [Header("=== ENGINE ===")]
     public float maxSpeed = 36f;
     public float maxReverseSpeed = 12f;
@@ -45,6 +47,12 @@ public class master_ship : MonoBehaviour, IShipState
     public float hydrodynamicDrag = 0.02f;
     [Tooltip("Slow and shudder when the keel touches the seabed.")]
     public bool enableGrounding = true;
+
+    [Header("=== WATER BACKEND ===")]
+    [Tooltip("Auto = use Suimono 2 water when a SUIMONO_Module is in the scene, otherwise the procedural ocean.")]
+    public WaterBackend waterBackend = WaterBackend.Auto;
+    [Tooltip("True when Suimono fx_buoyancy owns heave/attitude (set by Mothership). master_ship then only supplies thrust + rudder.")]
+    public bool externalBuoyancy = false;
 
     [Header("=== TEST MAP ===")]
     [Tooltip("Generate a procedural island + slalom-course test map at runtime.")]
@@ -167,6 +175,10 @@ public class master_ship : MonoBehaviour, IShipState
     private float smoothedHeel;
     private float smoothedPitch;
     private bool grounded;
+    private WaterBackend resolvedBackend = WaterBackend.Procedural;
+
+    public WaterBackend ResolvedBackend => resolvedBackend;
+    public Bounds LocalBounds => localBounds;
     private float hullRadius = 20f;
     private bool initialized;
 
@@ -195,7 +207,7 @@ public class master_ship : MonoBehaviour, IShipState
 
         rb = GetComponent<Rigidbody>();
         rb.isKinematic = false;
-        rb.useGravity = false;
+        rb.useGravity = externalBuoyancy;
         rb.interpolation = RigidbodyInterpolation.Interpolate;
         rb.collisionDetectionMode = CollisionDetectionMode.Discrete;
         rb.solverIterations = 6;
@@ -217,9 +229,10 @@ public class master_ship : MonoBehaviour, IShipState
         }
 
         EnsureCamera();
-        SetupOceanWaves();
+        ResolveWaterBackend();
+        if (resolvedBackend == WaterBackend.Procedural) SetupOceanWaves();
         SetupMaterials();
-        if (autoGenerateWater) CreateWaterRings();
+        if (autoGenerateWater && resolvedBackend == WaterBackend.Procedural) CreateWaterRings();
         SetupBuoyancy();
         SetupCameraRig();
         SetupEffects();
@@ -301,6 +314,41 @@ public class master_ship : MonoBehaviour, IShipState
         currentSpeed *= 1f - Mathf.Clamp01(Mathf.Abs(turnRateDeg) / Mathf.Max(1f, maxTurnRate)) * speedRatio * 0.25f * dt;
         shipYaw += turnRateDeg * dt;
         shipYaw = Mathf.Repeat(shipYaw + 180f, 360f) - 180f;
+
+        // ---------- PURE SUIMONO PATH: fx_buoyancy owns heave + attitude ----------
+        if (externalBuoyancy)
+        {
+            rb.angularVelocity = new Vector3(rb.angularVelocity.x, turnRateDeg * Mathf.Deg2Rad, rb.angularVelocity.z);
+            shipYaw = Mathf.Repeat(rb.rotation.eulerAngles.y + 180f, 360f) - 180f;
+
+            // HUD-only approximations of attitude
+            smoothedHeel = Mathf.MoveTowards(smoothedHeel, -currentRudder * turnHeelDegrees * 0.5f, heelSmooth * dt);
+            smoothedPitch = Mathf.MoveTowards(smoothedPitch, rb.rotation.eulerAngles.x > 180f
+                ? rb.rotation.eulerAngles.x - 360f
+                : rb.rotation.eulerAngles.x, pitchSmooth * dt);
+
+            Vector3 velE = rb.linearVelocity;
+            var horizontalE = new Vector3(velE.x, 0f, velE.z);
+            Vector3 fwdE = Quaternion.Euler(0f, shipYaw, 0f) * Vector3.forward;
+            Vector3 targetE = fwdE * currentSpeed;
+            float slipE = -(turnRateDeg / Mathf.Max(1f, maxTurnRate)) * speedRatio * driftFactor * currentSpeed;
+            targetE += transform.right * slipE;
+            Vector3 newHorizontalE = Vector3.MoveTowards(horizontalE, targetE, propulsionForce * dt);
+
+            float seabedE = float.NegativeInfinity;
+            grounded = enableGrounding && CheckGrounding(out seabedE);
+            float vy = velE.y;
+            if (grounded)
+            {
+                vy = Mathf.Max(vy, 0f);
+                currentSpeed = Mathf.MoveTowards(currentSpeed, 0f, 8f * dt);
+                if (Mathf.Abs(currentSpeed) > 4f && camRig != null && Time.frameCount % 10 == 0)
+                    camRig.AddShake(0.12f);
+            }
+
+            rb.linearVelocity = new Vector3(newHorizontalE.x, vy, newHorizontalE.z);
+            return;
+        }
 
         // ---------- orientation: wave plane + dynamic heel/pitch ----------
         Vector3 waterUp = buoyancy != null ? buoyancy.SmoothedWaveNormal : Vector3.up;
@@ -410,6 +458,9 @@ public class master_ship : MonoBehaviour, IShipState
     {
         if (!initialized) return;
 
+        if (resolvedBackend == WaterBackend.Suimono)
+            waterLevel = TFOU.Ship.SuimonoBridge.GetBaseLevel();
+
         FollowWaterRings();
         PushShipUniforms();
     }
@@ -432,6 +483,55 @@ public class master_ship : MonoBehaviour, IShipState
             camObj.AddComponent<AudioListener>();
     }
 
+    private void ResolveWaterBackend()
+    {
+        resolvedBackend = waterBackend switch
+        {
+            WaterBackend.Procedural => WaterBackend.Procedural,
+            WaterBackend.Suimono => WaterBackend.Suimono,
+            _ => TFOU.Ship.SuimonoBridge.Available ? WaterBackend.Suimono : WaterBackend.Procedural
+        };
+    }
+
+    /// <summary>Re-resolves the backend and rebuilds water objects. Safe to call any time.</summary>
+    public void ReconfigureWater()
+    {
+        if (!initialized) return;
+
+        TFOU.Ship.SuimonoBridge.Rescan();
+
+        if (nearTransform != null) { Destroy(nearTransform.gameObject); nearTransform = null; }
+        if (midTransform != null) { Destroy(midTransform.gameObject); midTransform = null; }
+        if (horizonTransform != null) { Destroy(horizonTransform.gameObject); horizonTransform = null; }
+
+        ResolveWaterBackend();
+
+        if (resolvedBackend == WaterBackend.Procedural)
+        {
+            SetupOceanWaves();
+            SetupMaterials();
+            if (autoGenerateWater) CreateWaterRings();
+        }
+        else
+        {
+            usingCustomShader = false;
+        }
+
+        if (buoyancy != null)
+            buoyancy.SurfaceOverride = resolvedBackend == WaterBackend.Suimono
+                ? (System.Func<Vector3, float>)TFOU.Ship.SuimonoBridge.GetSurfaceY
+                : null;
+
+        ApplyQualityTier();
+    }
+
+    /// <summary>Hands heave/attitude authority to Suimono fx_buoyancy (or takes it back).</summary>
+    public void SetExternalBuoyancy(bool external)
+    {
+        externalBuoyancy = external;
+        if (rb != null) rb.useGravity = external;
+    }
+
     private void SetupOceanWaves()
     {
         waves = OceanWaves.Ensure();
@@ -450,6 +550,9 @@ public class master_ship : MonoBehaviour, IShipState
         buoyancy = GetComponent<ShipBuoyancy>();
         if (buoyancy == null) buoyancy = gameObject.AddComponent<ShipBuoyancy>();
         buoyancy.ConfigureFrom(localBounds, verticalSpring, bobFollowSpeed, maxVerticalSpeed, tiltInfluence, tiltSmooth);
+        buoyancy.SurfaceOverride = resolvedBackend == WaterBackend.Suimono
+            ? (System.Func<Vector3, float>)TFOU.Ship.SuimonoBridge.GetSurfaceY
+            : null;
         buoyancy.OnBowSlam += HandleBowSlam;
     }
 
@@ -572,11 +675,20 @@ public class master_ship : MonoBehaviour, IShipState
     private void SetupMaterials()
     {
 #if UNITY_EDITOR
-        EnsureWaterMaterialAsset(SHADER_PATH, MAT_PATH, "AutoOceanWaterMat");
+        if (resolvedBackend == WaterBackend.Procedural)
+            EnsureWaterMaterialAsset(SHADER_PATH, MAT_PATH, "AutoOceanWaterMat");
         EnsureWaterMaterialAsset(SOFT_SHADER_PATH, SOFT_MAT_PATH, "AutoSoftParticleMat");
 #endif
-        Material waterBase = LoadGeneratedMaterial("AutoOceanWaterMat", MAT_PATH);
         softParticleMat = LoadGeneratedMaterial("AutoSoftParticleMat", SOFT_MAT_PATH);
+
+        if (resolvedBackend != WaterBackend.Procedural)
+        {
+            usingCustomShader = false;
+            waterMat = null;
+            return;
+        }
+
+        Material waterBase = LoadGeneratedMaterial("AutoOceanWaterMat", MAT_PATH);
 
         if (waterBase != null && waterBase.shader != null && waterBase.shader.isSupported)
         {
@@ -849,13 +961,14 @@ public class master_ship : MonoBehaviour, IShipState
             $"HEADING {heading:000}°\n" +
             $"RUDDER  {rudderState}\n" +
             $"SEA     Beaufort {seaState:0.0}  wind {windDirectionDeg:0}°\n" +
+            $"WATER   {(resolvedBackend == WaterBackend.Suimono ? (externalBuoyancy ? "SUIMONO (fx_buoyancy)" : "SUIMONO (hybrid)") : "PROCEDURAL")}\n" +
             $"CAM     {CamModeName()}   zoom wheel · C cycle\n" +
             $"<size=11>W/S engine · A/D rudder · Shift flank · Space brake · O/P sea state · F hud</size>";
 
         if (grounded)
             text = "!! GROUNDED - ease astern off the seabed\n" + text;
 
-        GUI.Box(new Rect(12, 12, 330, grounded ? 148f : 128f), text, hudStyle);
+        GUI.Box(new Rect(12, 12, 330, grounded ? 166f : 146f), text, hudStyle);
     }
 
     private string brakeText()
@@ -878,7 +991,7 @@ public class master_ship : MonoBehaviour, IShipState
 
         if (!Application.isPlaying || !initialized) return;
 
-        SetupOceanWaves();
+        if (resolvedBackend == WaterBackend.Procedural) SetupOceanWaves();
         SetWaterProps(waterMat);
         if (buoyancy != null)
             buoyancy.ConfigureFrom(localBounds, verticalSpring, bobFollowSpeed, maxVerticalSpeed, tiltInfluence, tiltSmooth);

@@ -428,7 +428,9 @@ namespace TFOU.World
         private float SurfaceYAt(float x, float z)
         {
             if (_waves == null) _waves = OceanWaves.Instance;
-            return _waves != null ? _waves.SurfaceY(x, z, Time.time) : _waterLevel;
+            if (_waves != null) return _waves.SurfaceY(x, z, Time.time);
+            if (SuimonoBridge.Available) return SuimonoBridge.GetSurfaceY(new Vector3(x, 0f, z));
+            return _waterLevel;
         }
 
         private void Update()
@@ -445,7 +447,7 @@ namespace TFOU.World
         private void BobDecorations()
         {
             if (_waves == null) _waves = OceanWaves.Instance;
-            if (_waves == null) return;
+            if (_waves == null && !SuimonoBridge.Available) return;
 
             float t = Time.time;
             for (int i = 0; i < _bobbers.Count; i++)
@@ -453,10 +455,10 @@ namespace TFOU.World
                 var b = _bobbers[i];
                 if (b.Transform == null) continue;
                 Vector3 p = b.Transform.position;
-                float surf = _waves.SurfaceY(p.x, p.z, t);
+                float surf = SurfaceYAt(p.x, p.z);
                 b.Transform.position = new Vector3(p.x, surf + b.BaseOffset, p.z);
 
-                Vector3 n = _waves.SampleNormal(p.x, p.z, t);
+                Vector3 n = _waves != null ? _waves.SampleNormal(p.x, p.z, t) : Vector3.up;
                 Quaternion tilt = Quaternion.FromToRotation(Vector3.up, Vector3.Slerp(Vector3.up, n, 0.8f));
                 b.Transform.rotation = Quaternion.Slerp(b.Transform.rotation, tilt, Time.deltaTime * 3f);
             }

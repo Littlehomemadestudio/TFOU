@@ -181,7 +181,7 @@ namespace TFOU.Ship
             _cam.fieldOfView = Mathf.Lerp(_cam.fieldOfView, targetFov, dt * 3f);
 
             // Never let the horizon clip at extreme zoom.
-            float waterY = OceanWaves.Instance != null ? OceanWaves.Instance.waterLevel : 0f;
+            float waterY = OceanWaves.Instance != null ? OceanWaves.Instance.waterLevel : SuimonoBridge.GetBaseLevel();
             if (transform.position.y < waterY + 1.5f && CurrentMode != Mode.Orbit)
             {
                 Vector3 p = transform.position;
