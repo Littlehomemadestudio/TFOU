@@ -80,6 +80,46 @@ The CPU never rewrites mesh data — per-frame water cost is zero upload.
 - **Wake:** `wakeStrength`, auto-scaled to hull length/beam.
 - **Performance:** lower `nearRingResolution` first, then `qualityTier`, then `planarReflections`.
 
+## Suimono 2 integration (Mothership)
+
+The repo carries the Suimono 2 script suite in `Assets/Scripts/SCRIPTS/`
+(namespace `Suimono.Core`). **`Mothership.cs` is the plug-and-play assembler**:
+attach it — and only it — to a ship root and it builds the full stack.
+
+```
+Mothership (attach to ship)
+  ├─ ensures Rigidbody + master_ship
+  ├─ detects a scene SUIMONO_Module  ── found ──▶ SUIMONO water = the original system
+  │        └─ not found ─────────────────────▶ procedural ocean fallback
+  ├─ buoyancy style:
+  │    HybridMasterShip (default)  master_ship handling, floating on Suimono
+  │                                waves via SuimonoBridge (SuimonoGetHeightAll)
+  │    PureSuimono                 spawns an fx_buoyancy cluster under the hull
+  │                                (applyToParent, splitFac force sharing);
+  │                                master_ship only feeds thrust + rudder
+  ├─ wires module.setCamera / module.setLight
+  ├─ fx_soundModule + AudioSource holder (assign your clips)
+  └─ optional experimental fx_EffectTrail wake
+```
+
+**To activate Suimono water:** import your purchased Suimono 2 asset into the
+project and drop its `SUIMONO_Module` prefab into the scene (name must stay
+`SUIMONO_Module` — the Suimono scripts find it by that name). Mothership
+auto-detects it at Play; the HUD shows which backend is live.
+
+**URP caveats for the Suimono suite:**
+- `SuimonoDepth`, `SuimonoCamera_depth`, `Suimono_DistanceBlur`,
+  `Suimono_UnderwaterFog` are `OnRenderImage`-based → **inert under URP**.
+  They compile, but URP never calls that callback. The underwater look under
+  URP would need a ScriptableRendererFeature port (roadmap item).
+- `fx_EffectTrail`'s mesh builder is partially commented out in this drop and
+  needs a Suimono trail material — that's why the wake defaults to the
+  procedural Kelvin wake + particle churn, which work on both backends.
+- ⚠️ Licensing: `SCRIPTS/` contains Suimono 2 **source code**. Publishing it
+  in a public repo is a bigger Asset Store EULA exposure than binaries were.
+  Strongly consider making this repo private or removing that folder from
+  history.
+
 ## Notes & caveats
 
 - `Assets/SUIMONO - WATER SYSTEM 2/` and `Assets/Military vehicles (Sea)/` are
