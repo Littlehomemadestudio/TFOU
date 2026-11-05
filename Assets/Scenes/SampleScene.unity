@@ -2395,6 +2395,7 @@ GameObject:
   - component: {fileID: 6252128112558760224}
   - component: {fileID: 686554395}
   - component: {fileID: 6741842223207037851}
+  - component: {fileID: 6741842223207037852}
   m_Layer: 0
   m_Name: Ship
   m_TagString: Untagged
@@ -3099,3 +3100,24 @@ SceneRoots:
   - {fileID: 410087041}
   - {fileID: 832575519}
   - {fileID: 6252128112558760224}
+
+--- !u!114 &6741842223207037852
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 6741842223207037850}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 909c9342297349ddb00e086005a0062e, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  waterPreference: 0
+  buoyancyStyle: 0
+  buoyancyPoints: 5
+  autoAddMasterShip: 1
+  wireSuimonoCamera: 1
+  addSoundHolder: 1
+  experimentalWakeTrail: 0
+  statusLog: 

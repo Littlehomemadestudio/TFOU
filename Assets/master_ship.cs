@@ -206,6 +206,7 @@ public class master_ship : MonoBehaviour, IShipState
         transform.rotation = Quaternion.Euler(0f, transform.eulerAngles.y, 0f);
 
         rb = GetComponent<Rigidbody>();
+        if (rb == null) rb = gameObject.AddComponent<Rigidbody>();
         rb.isKinematic = false;
         rb.useGravity = externalBuoyancy;
         rb.interpolation = RigidbodyInterpolation.Interpolate;
@@ -299,8 +300,10 @@ public class master_ship : MonoBehaviour, IShipState
 
         currentRudder = Mathf.MoveTowards(currentRudder, steer, rudderResponsiveness * dt);
 
-        // ---------- buoyancy (samples OceanWaves at 9 hull points) ----------
-        if (buoyancy != null) buoyancy.Simulate(dt);
+        // ---------- buoyancy (samples the active water surface at 9 hull points) ----------
+        // In Pure-Suimono mode fx_buoyancy's force cluster owns heave/attitude,
+        // so skip our sampler entirely (also saves 9 Suimono height lookups/frame).
+        if (buoyancy != null && !externalBuoyancy) buoyancy.Simulate(dt);
 
         // ---------- heading ----------
         float absSpeed = Mathf.Abs(currentSpeed);

@@ -58,6 +58,12 @@ public class Mothership : MonoBehaviour
     private master_ship _ship;
     private Rigidbody _rb;
 
+    private void OnValidate()
+    {
+        if (buoyancyStyle == BuoyancyStyle.PureSuimono && waterPreference == WaterPreference.Procedural)
+            Debug.LogWarning("[Mothership] PureSuimono buoyancy needs a SUIMONO_Module; your water backend is Procedural.");
+    }
+
     private void Start()
     {
         // Start (not Awake): when master_ship is a scene component too, its
@@ -129,10 +135,29 @@ public class Mothership : MonoBehaviour
         if (addSoundHolder) EnsureSoundHolder();
         if (experimentalWakeTrail && suimonoLive) TryWakeTrail();
 
-        statusLog = suimonoLive
-            ? $"SUIMONO water active | buoyancy: {(buoyancyStyle == BuoyancyStyle.PureSuimono ? "fx_buoyancy cluster" : "hybrid")}"
-            : "SUIMONO_Module not found -> procedural ocean fallback";
-        Debug.Log("[Mothership] " + statusLog);
+        if (suimonoLive)
+        {
+            statusLog = $"SUIMONO water active | buoyancy: {(buoyancyStyle == BuoyancyStyle.PureSuimono ? "fx_buoyancy cluster" : "hybrid")}";
+            Debug.Log("[Mothership] " + statusLog);
+        }
+        else
+        {
+            statusLog = "No SUIMONO_Module in scene -> procedural ocean active";
+            if (waterPreference == WaterPreference.Suimono)
+            {
+                // The repo ships Suimono's SCRIPTS only - its prefabs, materials,
+                // meshes and shaders live in the purchased Asset Store package.
+                Debug.LogWarning(
+                    "[Mothership] waterPreference = Suimono, but no SUIMONO_Module instance exists in the scene. " +
+                    "The Suimono scripts alone cannot render water. Import the full Suimono 2 asset, drop its " +
+                    "SUIMONO_Module prefab into the scene (keep the name), then re-run Setup Ship. " +
+                    "Falling back to the procedural ocean for now.");
+            }
+            else
+            {
+                Debug.Log("[Mothership] " + statusLog);
+            }
+        }
     }
 
     // ===================== Suimono wiring =====================

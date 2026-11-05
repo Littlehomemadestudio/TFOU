@@ -82,6 +82,38 @@ The CPU never rewrites mesh data — per-frame water cost is zero upload.
 
 ## Suimono 2 integration (Mothership)
 
+> **⚠️ Current state of this repo (read first):** only Suimono's **scripts** are
+> committed (`Assets/Scripts/SCRIPTS/`, namespace `Suimono.Core`). Its water
+> prefabs, meshes, materials, shaders and textures are **not** in this repo —
+> they ship with the purchased Asset Store package. A fresh clone therefore
+> cannot render Suimono water; it runs the procedural ocean, which is fully
+> featured. Everything below is the path to switch to Suimono once the asset is
+> imported locally.
+
+### Activating Suimono water (checklist)
+
+1. Import your purchased **Suimono 2** asset into the project.
+2. **Delete one copy of the scripts** — the imported asset brings its own
+   `Scripts/` folder, and two copies of `SuimonoModule` / `fx_buoyancy` etc.
+   cause `CS0101: duplicate definition` compile errors. Keep exactly one
+   (either `Assets/Scripts/SCRIPTS/` or the imported folder).
+3. Drop the **`SUIMONO_Module`** prefab into the scene. Keep the object name
+   `SUIMONO_Module` — the scripts locate it by name.
+4. Press Play. `Mothership` (attached to `Ship` in `SampleScene`) detects it on
+   `Start`, wires the module to `Camera.main` and the sun, and the HUD switches to
+   `WATER  SUIMONO (hybrid)`.
+5. Optional, for a fully Suimono-driven hull: set `Mothership.buoyancyStyle =
+   PureSuimono`. It spawns an `fx_buoyancy` force cluster (3–9 points, forces
+   auto-split via `splitFac`, gravity enabled) and `master_ship` drops to
+   thrust + rudder only — heave, pitch and roll come from Suimono's forces.
+
+### What the two backends share
+
+`ShipBuoyancy.SurfaceOverride` is the seam: in Suimono mode it is pointed at
+`SuimonoBridge.GetSurfaceY` (which wraps `SuimonoGetHeightAll(pos)[0]`), so the
+same 9-point plane-fit buoyancy maths floats the hull on Suimono's waves. Swap
+the delegate back to null and it samples the procedural Gerstner field again.
+
 The repo carries the Suimono 2 script suite in `Assets/Scripts/SCRIPTS/`
 (namespace `Suimono.Core`). **`Mothership.cs` is the plug-and-play assembler**:
 attach it — and only it — to a ship root and it builds the full stack.
